@@ -2,6 +2,7 @@
   "name": "somnarena",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -20,6 +21,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
+    "hardhat": "^3.6.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
