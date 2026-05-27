@@ -1,6 +1,8 @@
 import { globalSomniaChain, SomniaChain, TournamentData, MatchData, Tx, CONTRACT_ADDRESS } from '../blockchain/somniaSim';
-import { getPlayerDecision, getCommentary, AGENT_PROFILES, saveAgentMemory, PlayerDecision } from './agentLogic';
+import { getPlayerDecision, getCommentary, getAgentProfileByAddress, saveAgentMemory, PlayerDecision } from './agentLogic';
 import { resolveRound, updateMatchState, MatchState, Move } from '../engine/gameEngine';
+import { globalSomniaTestnetClient, CONTRACT_ADDRESS as TESTNET_CONTRACT_ADDRESS, CONTRACT_ABI as TESTNET_CONTRACT_ABI } from '../blockchain/somniaTestnetClient';
+import { ethers } from 'ethers';
 
 export type SimPhase =
   | 'IDLE'
@@ -47,6 +49,7 @@ export interface SimState {
   tournamentWinner: string | null;
   cooldownRemaining: number; // in seconds
   speedMultiplier: number; // 0.5x, 1x, 2x
+  isLiveTestnet: boolean;
 }
 
 export class AgentSimulator {
@@ -57,7 +60,7 @@ export class AgentSimulator {
   commentary: CommentaryMessage[] = [];
   
   // Settings
-  geminiApiKey: string = '';
+  claudeApiKey: string = '';
   timerId: NodeJS.Timeout | null = null;
   updateListeners: ((state: SimState) => void)[] = [];
   
@@ -73,6 +76,7 @@ export class AgentSimulator {
   }[] = [];
   
   currentBracketIndex = 0;
+  currentMatchRounds: { round: number; move1: Move; move2: Move; winner: string | null }[] = [];
 
   constructor(chain: SomniaChain = globalSomniaChain) {
     this.chain = chain;
@@ -92,7 +96,8 @@ export class AgentSimulator {
       matchWinner: null,
       tournamentWinner: null,
       cooldownRemaining: 0,
-      speedMultiplier: 1
+      speedMultiplier: 1,
+      isLiveTestnet: false
     };
     
     // Load chain and memory
@@ -105,9 +110,9 @@ export class AgentSimulator {
     const simData = localStorage.getItem('somnarena_sim_state');
     const actData = localStorage.getItem('somnarena_activities');
     const comData = localStorage.getItem('somnarena_commentary');
-    const apiKey = localStorage.getItem('somnarena_gemini_key');
+    const apiKey = localStorage.getItem('somnarena_claude_key');
 
-    if (apiKey) this.geminiApiKey = apiKey;
+    if (apiKey) this.claudeApiKey = apiKey;
 
     if (simData) {
       try {
@@ -127,6 +132,9 @@ export class AgentSimulator {
     if (comData) {
       try { this.commentary = JSON.parse(comData); } catch (e) {}
     }
+    if (this.state.isLiveTestnet) {
+      this.syncFromTestnet();
+    }
   }
 
   saveToLocalStorage() {
@@ -134,14 +142,165 @@ export class AgentSimulator {
     localStorage.setItem('somnarena_sim_state', JSON.stringify(this.state));
     localStorage.setItem('somnarena_activities', JSON.stringify(this.activities.slice(-100)));
     localStorage.setItem('somnarena_commentary', JSON.stringify(this.commentary.slice(-100)));
-    if (this.geminiApiKey) {
-      localStorage.setItem('somnarena_gemini_key', this.geminiApiKey);
+    if (this.claudeApiKey) {
+      localStorage.setItem('somnarena_claude_key', this.claudeApiKey);
     }
   }
 
-  setGeminiApiKey(key: string) {
-    this.geminiApiKey = key;
+  setClaudeApiKey(key: string) {
+    this.claudeApiKey = key;
     this.saveToLocalStorage();
+  }
+
+  setLiveTestnet(enabled: boolean) {
+    this.state.isLiveTestnet = enabled;
+    this.saveToLocalStorage();
+    this.notify();
+    if (enabled) {
+      this.syncFromTestnet();
+    }
+  }
+
+  async syncFromTestnet() {
+    if (!this.state.isLiveTestnet) return;
+    try {
+      // 1. Sync tournaments list
+      const tournaments = await globalSomniaTestnetClient.syncTournaments();
+      this.chain.tournaments = tournaments;
+      
+      // Update next tournament ID
+      const nextTId = await globalSomniaTestnetClient.contract.nextTournamentId();
+      this.chain.nextTournamentId = Number(nextTId);
+
+      // 2. Sync matches details
+      const nextMId = await globalSomniaTestnetClient.contract.nextMatchId();
+      this.chain.nextMatchId = Number(nextMId);
+      
+      for (let i = 1; i < Number(nextMId); i++) {
+        const raw = await globalSomniaTestnetClient.contract.matches(i);
+        this.chain.matches[i] = {
+          id: Number(raw.id),
+          tournamentId: Number(raw.tournamentId),
+          player1: raw.player1,
+          player2: raw.player2,
+          state: raw.state === 0 ? 'Pending' : raw.state === 1 ? 'Active' : 'Resolved',
+          winner: raw.winner === ethers.ZeroAddress ? null : raw.winner
+        };
+      }
+
+      // 3. Sync agent balances
+      const wallets = await globalSomniaTestnetClient.syncAgentBalances();
+      this.chain.accounts.forEach(acc => {
+        const wallet = wallets.find(w => w.name.toLowerCase() === acc.name.toLowerCase() || w.role.toLowerCase() === acc.role.toLowerCase());
+        if (wallet) {
+          acc.balance = Number(wallet.contractBalance);
+          (acc as any).nativeBalance = Number(wallet.nativeBalance);
+          acc.address = wallet.address;
+        }
+      });
+
+      // 4. Update block number in mock chain blocks list (explorer view)
+      const blockNum = await globalSomniaTestnetClient.provider.getBlockNumber();
+      const latestBlock = await globalSomniaTestnetClient.provider.getBlock(blockNum, true);
+      if (latestBlock && !this.chain.blocks.some(b => b.number === blockNum)) {
+        const mappedTx = latestBlock.transactions.map((tx: any) => {
+          const isString = typeof tx === 'string';
+          const hash = isString ? tx : tx.hash || '';
+          const from = isString ? '' : tx.from || '';
+          const to = isString ? '' : tx.to || '';
+          const val = isString || tx.value === undefined || tx.value === null ? BigInt(0) : BigInt(tx.value);
+          return {
+            hash,
+            blockNumber: blockNum,
+            timestamp: Number(latestBlock.timestamp) * 1000,
+            from,
+            to,
+            method: 'unknown',
+            args: [],
+            value: Number(ethers.formatEther(val)),
+            gasUsed: 21000,
+            status: 'success' as const
+          };
+        });
+        this.chain.blocks.push({
+          number: blockNum,
+          hash: latestBlock.hash || '',
+          parentHash: latestBlock.parentHash || '',
+          timestamp: Number(latestBlock.timestamp) * 1000,
+          transactions: mappedTx
+        });
+        if (this.chain.blocks.length > 50) {
+          this.chain.blocks.shift();
+        }
+      }
+
+      this.chain.saveToLocalStorage();
+      this.notify();
+    } catch (e) {
+      console.error('Failed to sync from testnet:', e);
+    }
+  }
+
+  private async executeTx(from: string, method: string, args: any[], value: number = 0) {
+    if (this.state.isLiveTestnet) {
+      try {
+        const wallets = globalSomniaTestnetClient.getAgentWallets();
+        const agent = wallets.find(w => w.address.toLowerCase() === from.toLowerCase() || w.role.toLowerCase() === from.toLowerCase());
+        if (agent && agent.privateKey) {
+          const signer = new ethers.Wallet(agent.privateKey, globalSomniaTestnetClient.provider);
+          const contractWithSigner = new ethers.Contract(
+            TESTNET_CONTRACT_ADDRESS,
+            TESTNET_CONTRACT_ABI,
+            signer
+          );
+
+          if (method === 'createTournament') {
+            const prizeFundsSTT = args[2];
+            const requiredWei = ethers.parseEther(prizeFundsSTT.toString());
+            const currentBal = await contractWithSigner.balances(agent.address);
+            if (currentBal < requiredWei) {
+              const needed = requiredWei - currentBal;
+              console.log(`[Auto-Escrow] Organizer escrow balance low (${ethers.formatEther(currentBal)} STT). Minting ${ethers.formatEther(needed)} STT via depositSTT...`);
+              const tx = await contractWithSigner.depositSTT(needed);
+              await tx.wait(1);
+              console.log(`[Auto-Escrow] Escrow top-up transaction completed.`);
+            }
+          } else if (method === 'joinTournament') {
+            const tId = args[0];
+            const t = await contractWithSigner.tournaments(tId);
+            const entryFeeWei = t.entryFee || t[2];
+            const currentBal = await contractWithSigner.balances(agent.address);
+            if (currentBal < entryFeeWei) {
+              const needed = entryFeeWei - currentBal;
+              console.log(`[Auto-Escrow] Player ${agent.name} escrow balance low (${ethers.formatEther(currentBal)} STT). Minting ${ethers.formatEther(needed)} STT via depositSTT...`);
+              const tx = await contractWithSigner.depositSTT(needed);
+              await tx.wait(1);
+              console.log(`[Auto-Escrow] Escrow top-up transaction completed.`);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[Auto-Escrow] Check/mint execution error:", err);
+      }
+
+      const res = await globalSomniaTestnetClient.submitTransaction(from, method, args, value.toString());
+      if (res.status === 'success') {
+        await this.syncFromTestnet();
+        return {
+          status: 'success' as const,
+          hash: res.hash,
+          error: undefined
+        };
+      } else {
+        return {
+          status: 'failed' as const,
+          hash: res.hash,
+          error: res.error
+        };
+      }
+    } else {
+      return this.chain.submitTransaction(from, method, args, value);
+    }
   }
 
   subscribe(listener: (state: SimState) => void) {
@@ -171,7 +330,7 @@ export class AgentSimulator {
   }
 
   private async pushCommentary(stage: Parameters<typeof getCommentary>[0], contextData: any) {
-    const text = await getCommentary(stage, contextData, this.geminiApiKey);
+    const text = await getCommentary(stage, contextData, this.claudeApiKey);
     const msg: CommentaryMessage = {
       id: Math.random().toString(),
       text,
@@ -275,7 +434,9 @@ export class AgentSimulator {
 
   // 1. Organizer Creates Tournament
   private async organizerCreateTournament() {
-    const organizer = '0x1111111111111111111111111111111111111111';
+    const organizer = this.state.isLiveTestnet 
+      ? globalSomniaTestnetClient.getAgentWallets().find(w => w.role === 'organizer')?.address || ''
+      : '0x1111111111111111111111111111111111111111';
     const orgName = 'Synthetix Organizer';
 
     this.logActivity(organizer, orgName, 'Analyzing current participant grid. Formulating tournament config...');
@@ -288,14 +449,17 @@ export class AgentSimulator {
       this.logActivity(organizer, orgName, `Broadcasting createTournament(fee: ${entryFee} STT, maxPlayers: ${maxPlayers}, sponsor: ${prizeFunds} STT) to L1 mempool.`);
 
       // Send L1 transaction
-      const tx = this.chain.submitTransaction(organizer, 'createTournament', [entryFee, maxPlayers, prizeFunds]);
+      const tx = await this.executeTx(organizer, 'createTournament', [entryFee, maxPlayers, prizeFunds]);
       if (tx.status === 'success') {
         const tId = this.chain.nextTournamentId - 1;
         this.state.activeTournamentId = tId;
         this.state.phase = 'PLAYERS_JOINING';
         this.notify();
 
-        this.logActivity(organizer, orgName, `Tournament contract initiated. ID: #${tId} - Awaiting Player staking transactions.`);
+        const logMsg = this.state.isLiveTestnet
+          ? `Tournament contract initiated. ID: #${tId} - Tx: ${tx.hash.substring(0, 10)}...`
+          : `Tournament contract initiated. ID: #${tId} - Awaiting Player staking transactions.`;
+        this.logActivity(organizer, orgName, logMsg);
         
         // Trigger commentary
         await this.pushCommentary('join', { playerName: 'Synthetix Organizer (Escrow Sponsor)' });
@@ -314,7 +478,13 @@ export class AgentSimulator {
     const t = this.chain.tournaments[tId];
     
     // Four player addresses
-    const playerAddresses = [
+    const wallets = globalSomniaTestnetClient.getAgentWallets();
+    const playerAddresses = this.state.isLiveTestnet ? [
+      wallets.find(w => w.role === 'player_shadowbyte')?.address || '',
+      wallets.find(w => w.role === 'player_quantumcore')?.address || '',
+      wallets.find(w => w.role === 'player_cyberslasher')?.address || '',
+      wallets.find(w => w.role === 'player_neonviper')?.address || '',
+    ] : [
       '0x4444444444444444444444444444444444444444', // ShadowByte
       '0x5555555555555555555555555555555555555555', // QuantumCore
       '0x6666666666666666666666666666666666666666', // CyberSlasher
@@ -325,14 +495,17 @@ export class AgentSimulator {
 
     if (joinedCount < t.maxPlayers) {
       const nextPlayerAddress = playerAddresses[joinedCount];
-      const profile = AGENT_PROFILES[nextPlayerAddress];
+      const profile = getAgentProfileByAddress(nextPlayerAddress);
 
       this.runAfterDelay(async () => {
         this.logActivity(nextPlayerAddress, profile.name, `Staking ${t.entryFee} STT to join Tournament #${tId}. Invoking joinTournament().`);
         
-        const tx = this.chain.submitTransaction(nextPlayerAddress, 'joinTournament', [tId]);
+        const tx = await this.executeTx(nextPlayerAddress, 'joinTournament', [tId]);
         if (tx.status === 'success') {
-          this.logActivity(nextPlayerAddress, profile.name, `Staked successfully. Confirmed onchain.`);
+          const logMsg = this.state.isLiveTestnet
+            ? `Staked successfully. Confirmed onchain: ${tx.hash.substring(0, 10)}...`
+            : `Staked successfully. Confirmed onchain.`;
+          this.logActivity(nextPlayerAddress, profile.name, logMsg);
           await this.pushCommentary('join', { playerName: profile.name });
 
           // If this was the last player, state transitions to Active, proceed to matchmaking
@@ -342,10 +515,8 @@ export class AgentSimulator {
           }
           this.runLoop();
         } else {
-          this.logActivity(nextPlayerAddress, profile.name, `ERROR: Stake transaction failed: ${tx.error}. Claiming faucet STT...`);
-          // Faucet claim fallback
-          this.chain.submitTransaction(nextPlayerAddress, 'faucetClaim', []);
-          this.runLoop();
+          this.logActivity(nextPlayerAddress, profile.name, `ERROR: Stake transaction failed: ${tx.error}.`);
+          this.stopSimulation();
         }
       }, 1500);
     }
@@ -353,7 +524,9 @@ export class AgentSimulator {
 
   // 3. Referee sets up bracket
   private async refereeCreateBracket() {
-    const referee = '0x2222222222222222222222222222222222222222';
+    const referee = this.state.isLiveTestnet
+      ? globalSomniaTestnetClient.getAgentWallets().find(w => w.role === 'referee')?.address || ''
+      : '0x2222222222222222222222222222222222222222';
     const refName = 'Ref-Alpha Arbitrator';
     const tId = this.state.activeTournamentId!;
     const t = this.chain.tournaments[tId];
@@ -366,31 +539,34 @@ export class AgentSimulator {
         { stage: 'Semifinals', p1: t.players[0], p2: t.players[1], matchId: null, resolved: false, winner: null },
         { stage: 'Semifinals', p1: t.players[2], p2: t.players[3], matchId: null, resolved: false, winner: null },
         { stage: 'Finals', p1: '', p2: '', matchId: null, resolved: false, winner: null } // Winners will be set later
-      ];
+      ] as any;
       this.currentBracketIndex = 0;
       this.state.phase = 'MATCH_STARTING';
       this.notify();
 
-      this.logActivity(referee, refName, `Brackets locked: Semifinal 1 (${AGENT_PROFILES[t.players[0]].name} vs ${AGENT_PROFILES[t.players[1]].name}), Semifinal 2 (${AGENT_PROFILES[t.players[2]].name} vs ${AGENT_PROFILES[t.players[3]].name}).`);
+      this.logActivity(referee, refName, `Brackets locked: Semifinal 1 (${getAgentProfileByAddress(t.players[0]).name} vs ${getAgentProfileByAddress(t.players[1]).name}), Semifinal 2 (${getAgentProfileByAddress(t.players[2]).name} vs ${getAgentProfileByAddress(t.players[3]).name}).`);
       this.runLoop();
     }, 2000);
   }
 
   // 4. Start the next match in bracket
   private async startNextMatch() {
-    const referee = '0x2222222222222222222222222222222222222222';
+    const referee = this.state.isLiveTestnet
+      ? globalSomniaTestnetClient.getAgentWallets().find(w => w.role === 'referee')?.address || ''
+      : '0x2222222222222222222222222222222222222222';
     const refName = 'Ref-Alpha Arbitrator';
     const tId = this.state.activeTournamentId!;
     const activeMatch = this.bracketMatches[this.currentBracketIndex];
 
     this.runAfterDelay(async () => {
-      this.logActivity(referee, refName, `Submitting startMatch(tournament: ${tId}, p1: ${AGENT_PROFILES[activeMatch.p1].name}, p2: ${AGENT_PROFILES[activeMatch.p2].name}) onchain.`);
+      this.logActivity(referee, refName, `Submitting startMatch(tournament: ${tId}, p1: ${getAgentProfileByAddress(activeMatch.p1).name}, p2: ${getAgentProfileByAddress(activeMatch.p2).name}) onchain.`);
       
-      const tx = this.chain.submitTransaction(referee, 'startMatch', [tId, activeMatch.p1, activeMatch.p2]);
+      const tx = await this.executeTx(referee, 'startMatch', [tId, activeMatch.p1, activeMatch.p2]);
       if (tx.status === 'success') {
         const mId = this.chain.nextMatchId - 1;
         activeMatch.matchId = mId;
         
+        this.currentMatchRounds = [];
         this.state.activeMatchId = mId;
         this.state.player1Address = activeMatch.p1;
         this.state.player2Address = activeMatch.p2;
@@ -406,10 +582,13 @@ export class AgentSimulator {
         this.state.phase = 'PLAYERS_THINKING';
         this.notify();
 
-        this.logActivity(referee, refName, `Match #${mId} is officially Active on L1 block explorer.`);
+        const logMsg = this.state.isLiveTestnet
+          ? `Match #${mId} is officially Active on L1 block explorer. Tx: ${tx.hash.substring(0, 10)}...`
+          : `Match #${mId} is officially Active on L1 block explorer.`;
+        this.logActivity(referee, refName, logMsg);
         await this.pushCommentary('match_start', {
-          p1Name: AGENT_PROFILES[activeMatch.p1].name,
-          p2Name: AGENT_PROFILES[activeMatch.p2].name
+          p1Name: getAgentProfileByAddress(activeMatch.p1).name,
+          p2Name: getAgentProfileByAddress(activeMatch.p2).name
         });
 
         this.runLoop();
@@ -424,23 +603,18 @@ export class AgentSimulator {
   private async generateMoves() {
     const p1 = this.state.player1Address!;
     const p2 = this.state.player2Address!;
-    const p1Name = AGENT_PROFILES[p1].name;
-    const p2Name = AGENT_PROFILES[p2].name;
+    const p1Name = getAgentProfileByAddress(p1).name;
+    const p2Name = getAgentProfileByAddress(p2).name;
     const mId = this.state.activeMatchId!;
 
     this.logActivity(p1, p1Name, `Analyzing match state. Calculating decision tree for Round ${this.state.currentRoundNum}...`);
     this.logActivity(p2, p2Name, `Analyzing match state. Calculating decision tree for Round ${this.state.currentRoundNum}...`);
 
     this.runAfterDelay(async () => {
-      // Fetch match history in our current match to input to agent logic
-      const mData = this.chain.matches[mId];
-      // Create a local roundHistory array representing what's happened so far in this match
-      // The gameEngine matches can represent it. But we can build it from our simulated state
-      // (For now, let's keep it basic since round-by-round is tracked in this.state.rounds which we'll update)
-      const mockHistory: any[] = []; // In a larger simulation we would pass detailed rounds, let's simulate this:
+      const mockHistory = this.currentMatchRounds;
 
-      const decision1Promise = getPlayerDecision(p1, p2, this.state.currentRoundNum, mockHistory, true, this.geminiApiKey);
-      const decision2Promise = getPlayerDecision(p2, p1, this.state.currentRoundNum, mockHistory, false, this.geminiApiKey);
+      const decision1Promise = getPlayerDecision(p1, p2, this.state.currentRoundNum, mockHistory, true, this.claudeApiKey);
+      const decision2Promise = getPlayerDecision(p2, p1, this.state.currentRoundNum, mockHistory, false, this.claudeApiKey);
 
       const [dec1, dec2] = await Promise.all([decision1Promise, decision2Promise]);
 
@@ -461,12 +635,14 @@ export class AgentSimulator {
 
   // 6. Referee resolves RPS round
   private async resolveRpsRound() {
-    const referee = '0x2222222222222222222222222222222222222222';
+    const referee = this.state.isLiveTestnet
+      ? globalSomniaTestnetClient.getAgentWallets().find(w => w.role === 'referee')?.address || ''
+      : '0x2222222222222222222222222222222222222222';
     const refName = 'Ref-Alpha Arbitrator';
     const p1 = this.state.player1Address!;
     const p2 = this.state.player2Address!;
-    const p1Name = AGENT_PROFILES[p1].name;
-    const p2Name = AGENT_PROFILES[p2].name;
+    const p1Name = getAgentProfileByAddress(p1).name;
+    const p2Name = getAgentProfileByAddress(p2).name;
 
     this.logActivity(referee, refName, `Move reveal packets received. Opening cryptographic commitments...`);
 
@@ -497,6 +673,7 @@ export class AgentSimulator {
       });
 
       // Update local match score
+      this.currentMatchRounds.push(roundRes);
       if (roundRes.winner === 'player1') {
         this.state.player1Wins++;
       } else if (roundRes.winner === 'player2') {
@@ -525,12 +702,14 @@ export class AgentSimulator {
 
   // 7. Check if Match needs more rounds or is resolved
   private async checkMatchProgression() {
-    const referee = '0x2222222222222222222222222222222222222222';
+    const referee = this.state.isLiveTestnet
+      ? globalSomniaTestnetClient.getAgentWallets().find(w => w.role === 'referee')?.address || ''
+      : '0x2222222222222222222222222222222222222222';
     const refName = 'Ref-Alpha Arbitrator';
     const p1 = this.state.player1Address!;
     const p2 = this.state.player2Address!;
-    const p1Name = AGENT_PROFILES[p1].name;
-    const p2Name = AGENT_PROFILES[p2].name;
+    const p1Name = getAgentProfileByAddress(p1).name;
+    const p2Name = getAgentProfileByAddress(p2).name;
 
     this.runAfterDelay(async () => {
       // Check if match resolved (first to 2 wins)
@@ -555,7 +734,7 @@ export class AgentSimulator {
 
         // Submit match result transaction
         const mId = this.state.activeMatchId!;
-        const tx = this.chain.submitTransaction(referee, 'submitResult', [mId, winner]);
+        const tx = await this.executeTx(referee, 'submitResult', [mId, winner]);
         if (tx.status !== 'success') {
           console.error('Failed to submit match result to L1:', tx.error);
         }
@@ -580,7 +759,9 @@ export class AgentSimulator {
 
   // 8. Progress brackets
   private async checkBracketProgression() {
-    const referee = '0x2222222222222222222222222222222222222222';
+    const referee = this.state.isLiveTestnet
+      ? globalSomniaTestnetClient.getAgentWallets().find(w => w.role === 'referee')?.address || ''
+      : '0x2222222222222222222222222222222222222222';
     const refName = 'Ref-Alpha Arbitrator';
 
     this.runAfterDelay(async () => {
@@ -600,7 +781,7 @@ export class AgentSimulator {
         this.bracketMatches[2].p1 = finalist1;
         this.bracketMatches[2].p2 = finalist2;
 
-        this.logActivity(referee, refName, `Semifinals complete. Final bracket generated: ${AGENT_PROFILES[finalist1].name} vs ${AGENT_PROFILES[finalist2].name}.`);
+        this.logActivity(referee, refName, `Semifinals complete. Final bracket generated: ${getAgentProfileByAddress(finalist1).name} vs ${getAgentProfileByAddress(finalist2).name}.`);
         
         this.state.phase = 'MATCH_STARTING';
         this.notify();
@@ -612,7 +793,7 @@ export class AgentSimulator {
         this.state.phase = 'TOURNAMENT_FINALIZING';
         this.notify();
 
-        this.logActivity(referee, refName, `Final match resolved! Champion is ${AGENT_PROFILES[champ].name}. Triggering finalizeTournament() onchain.`);
+        this.logActivity(referee, refName, `Final match resolved! Champion is ${getAgentProfileByAddress(champ).name}. Triggering finalizeTournament() onchain.`);
         this.runLoop();
       } else {
         // Move to the next match (Semifinal 2)
@@ -625,15 +806,17 @@ export class AgentSimulator {
 
   // 9. Referee Finalizes Tournament and contract distributes STT payout
   private async finalizeTournamentOnchain() {
-    const referee = '0x2222222222222222222222222222222222222222';
+    const referee = this.state.isLiveTestnet
+      ? globalSomniaTestnetClient.getAgentWallets().find(w => w.role === 'referee')?.address || ''
+      : '0x2222222222222222222222222222222222222222';
     const refName = 'Ref-Alpha Arbitrator';
     const tId = this.state.activeTournamentId!;
     const champ = this.state.tournamentWinner!;
-    const champName = AGENT_PROFILES[champ].name;
+    const champName = getAgentProfileByAddress(champ).name;
     const t = this.chain.tournaments[tId];
 
     this.runAfterDelay(async () => {
-      const tx = this.chain.submitTransaction(referee, 'finalizeTournament', [tId, champ]);
+      const tx = await this.executeTx(referee, 'finalizeTournament', [tId, champ]);
       if (tx.status === 'success') {
         this.logActivity(referee, refName, `Tournament #${tId} officially finalized. Prize pool of ${t.totalPrizePool} STT transferred to ${champName}'s wallet escrow.`);
         

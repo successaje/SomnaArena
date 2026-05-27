@@ -1,4 +1,5 @@
 import { Move, MOVES, MOVE_NAMES, MOVE_BEATS } from '../engine/gameEngine';
+import { globalSomniaTestnetClient } from '../blockchain/somniaTestnetClient';
 
 export interface PlayerDecision {
   thought: string;
@@ -44,6 +45,48 @@ export const AGENT_PROFILES: Record<string, AgentProfile> = {
   }
 };
 
+export function getAgentProfileByAddress(address: string): AgentProfile {
+  if (!address) {
+    return {
+      address: '',
+      name: 'Unknown',
+      personality: 'None',
+      strategyDescription: '',
+      avatar: '🤖'
+    };
+  }
+
+  const staticProfile = AGENT_PROFILES[address.toLowerCase()];
+  if (staticProfile) return staticProfile;
+
+  // Search in generated wallets
+  const wallets = globalSomniaTestnetClient.getAgentWallets();
+  const match = wallets.find(w => w.address.toLowerCase() === address.toLowerCase());
+  if (match) {
+    const roleToStaticAddr: Record<string, string> = {
+      'player_shadowbyte': '0x4444444444444444444444444444444444444444',
+      'player_quantumcore': '0x5555555555555555555555555555555555555555',
+      'player_cyberslasher': '0x6666666666666666666666666666666666666666',
+      'player_neonviper': '0x7777777777777777777777777777777777777777'
+    };
+    const staticAddr = roleToStaticAddr[match.role];
+    if (staticAddr && AGENT_PROFILES[staticAddr]) {
+      return {
+        ...AGENT_PROFILES[staticAddr],
+        address: match.address
+      };
+    }
+  }
+
+  return {
+    address,
+    name: address.substring(0, 8),
+    personality: 'Autonomous Agent Wallet',
+    strategyDescription: 'Interacts onchain with live testnet contracts.',
+    avatar: '🤖'
+  };
+}
+
 // Memory store schema
 export interface AgentMemoryItem {
   opponentAddress: string;
@@ -72,31 +115,37 @@ export function saveAgentMemory(address: string, item: AgentMemoryItem) {
   mem.history.push(item);
 }
 
-// Call Gemini API if available, else fall back to rule-based logic
-async function callGeminiAPI(apiKey: string, prompt: string): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-  
+function cleanJsonResponse(raw: string): string {
+  let cleaned = raw.trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(json)?/, '').replace(/```$/, '').trim();
+  }
+  return cleaned;
+}
+
+// Call Claude API via our local API proxy if available, else fall back to rule-based logic
+async function callClaudeAPI(apiKey: string, prompt: string): Promise<string> {
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), 3000);
+  const id = setTimeout(() => controller.abort(), 8000); // 8s timeout
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch('/api/claude', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: 'application/json'
-        }
+        apiKey,
+        prompt,
+        model: 'claude-haiku-4-5-20251001'
       }),
       signal: controller.signal
     });
     clearTimeout(id);
     if (!response.ok) {
-      throw new Error(`Gemini API error: ${response.statusText}`);
+      const errData = await response.json();
+      throw new Error(errData.error || `Claude API error: ${response.statusText}`);
     }
     const result = await response.json();
-    return result.candidates[0].content.parts[0].text;
+    return result.content[0].text;
   } catch (e) {
     clearTimeout(id);
     throw e;
@@ -112,7 +161,7 @@ export async function getPlayerDecision(
   currentRound: number,
   roundHistory: { round: number; move1: Move; move2: Move; winner: string | null }[],
   isPlayer1: boolean,
-  geminiApiKey?: string
+  claudeApiKey?: string
 ): Promise<PlayerDecision> {
   const profile = AGENT_PROFILES[playerAddress] || {
     address: playerAddress,
@@ -125,8 +174,8 @@ export async function getPlayerDecision(
   const opponentName = AGENT_PROFILES[opponentAddress]?.name || 'Opponent';
   const myMemory = getAgentMemory(playerAddress);
 
-  // Construct system prompt for Gemini if provided
-  if (geminiApiKey && geminiApiKey.trim() !== "" && geminiApiKey !== "undefined" && geminiApiKey !== "null") {
+  // Construct system prompt for Claude if provided
+  if (claudeApiKey && claudeApiKey.trim() !== "" && claudeApiKey !== "undefined" && claudeApiKey !== "null") {
     const memorySnippet = myMemory.history
       .filter(m => m.opponentAddress === opponentAddress)
       .slice(-5)
@@ -165,8 +214,9 @@ export async function getPlayerDecision(
     `;
 
     try {
-      const responseText = await callGeminiAPI(geminiApiKey, prompt);
-      const parsed = JSON.parse(responseText);
+      const responseText = await callClaudeAPI(claudeApiKey, prompt);
+      const cleanedJson = cleanJsonResponse(responseText);
+      const parsed = JSON.parse(cleanedJson);
       if (parsed.move && MOVES.includes(parsed.move)) {
         return {
           thought: parsed.thought || 'Calculating optimal grid coordinates...',
@@ -174,17 +224,47 @@ export async function getPlayerDecision(
         };
       }
     } catch (e) {
-      console.warn(`Gemini call failed for ${profile.name}, falling back to rule engine:`, e);
+      console.warn(`Claude call failed for ${profile.name}, falling back to rule engine:`, e);
     }
   }
 
   // Fallback Rule-Based Engine with detailed reasoning logs
+  let staticAddr = playerAddress.toLowerCase();
+  let staticOppAddr = opponentAddress.toLowerCase();
+  const wallets = globalSomniaTestnetClient.getAgentWallets();
+
+  const match = wallets.find(w => w.address.toLowerCase() === playerAddress.toLowerCase());
+  if (match) {
+    const roleToStaticAddr: Record<string, string> = {
+      'player_shadowbyte': '0x4444444444444444444444444444444444444444',
+      'player_quantumcore': '0x5555555555555555555555555555555555555555',
+      'player_cyberslasher': '0x6666666666666666666666666666666666666666',
+      'player_neonviper': '0x7777777777777777777777777777777777777777'
+    };
+    if (roleToStaticAddr[match.role]) {
+      staticAddr = roleToStaticAddr[match.role].toLowerCase();
+    }
+  }
+
+  const oppMatch = wallets.find(w => w.address.toLowerCase() === opponentAddress.toLowerCase());
+  if (oppMatch) {
+    const roleToStaticAddr: Record<string, string> = {
+      'player_shadowbyte': '0x4444444444444444444444444444444444444444',
+      'player_quantumcore': '0x5555555555555555555555555555555555555555',
+      'player_cyberslasher': '0x6666666666666666666666666666666666666666',
+      'player_neonviper': '0x7777777777777777777777777777777777777777'
+    };
+    if (roleToStaticAddr[oppMatch.role]) {
+      staticOppAddr = roleToStaticAddr[oppMatch.role].toLowerCase();
+    }
+  }
+
   const oppMoveHistory = roundHistory.map(r => (isPlayer1 ? r.move2 : r.move1));
   const myMoveHistory = roundHistory.map(r => (isPlayer1 ? r.move1 : r.move2));
   const oppLastMove = oppMoveHistory[oppMoveHistory.length - 1];
   const myLastMove = myMoveHistory[myMoveHistory.length - 1];
 
-  switch (playerAddress) {
+  switch (staticAddr) {
     case '0x4444444444444444444444444444444444444444': {
       // ShadowByte - Psychological Bluffer
       if (currentRound === 1) {
@@ -338,10 +418,10 @@ export async function getPlayerDecision(
 export async function getCommentary(
   stage: 'join' | 'match_start' | 'round_resolve' | 'match_resolve' | 'tournament_finalize',
   contextData: any,
-  geminiApiKey?: string
+  claudeApiKey?: string
 ): Promise<string> {
 
-  if (geminiApiKey && geminiApiKey.trim() !== "" && geminiApiKey !== "undefined" && geminiApiKey !== "null") {
+  if (claudeApiKey && claudeApiKey.trim() !== "" && claudeApiKey !== "undefined" && claudeApiKey !== "null") {
     let contextStr = '';
     if (stage === 'join') {
       contextStr = `Player ${contextData.playerName} has staked their fees and entered the tournament.`;
@@ -366,12 +446,12 @@ export async function getCommentary(
     `;
 
     try {
-      const responseText = await callGeminiAPI(geminiApiKey, prompt);
+      const responseText = await callClaudeAPI(claudeApiKey, prompt);
       // Clean quotes
       const cleanCommentary = responseText.replace(/^["']|["']$/g, '').trim();
       if (cleanCommentary) return cleanCommentary;
     } catch (e) {
-      console.warn("Commentator Gemini call failed, using local soundboard:", e);
+      console.warn("Commentator Claude call failed, using local soundboard:", e);
     }
   }
 

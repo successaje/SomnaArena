@@ -3,11 +3,13 @@
 import { useEffect, useState, useRef } from 'react';
 import { globalSomniaChain, Tx, Block, ChainEvent, TournamentData, MatchData, AGENT_ACCOUNTS } from '../blockchain/somniaSim';
 import { globalAgentSimulator, SimState, AgentActivityLog, CommentaryMessage } from '../agents/agentSystem';
-import { AGENT_PROFILES, getAgentMemory } from '../agents/agentLogic';
+import { getAgentProfileByAddress, getAgentMemory } from '../agents/agentLogic';
 import { MOVE_NAMES, Move } from '../engine/gameEngine';
+import { globalSomniaTestnetClient } from '../blockchain/somniaTestnetClient';
 
 export default function SomnArenaApp() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'bracket' | 'arena' | 'leaderboard' | 'explorer' | 'settings'>('dashboard');
+  const [mounted, setMounted] = useState(false);
   
   // Simulated Chain & Sim states
   const [simState, setSimState] = useState<SimState>(globalAgentSimulator.state);
@@ -26,8 +28,12 @@ export default function SomnArenaApp() {
   const [selectedTx, setSelectedTx] = useState<Tx | null>(null);
   
   // Settings API Key
-  const [geminiKeyInput, setGeminiKeyInput] = useState('');
+  const [claudeKeyInput, setClaudeKeyInput] = useState('');
   const [gasPrice, setGasPrice] = useState(105);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Auto-scroll feeds
   const activityEndRef = useRef<HTMLDivElement>(null);
@@ -37,7 +43,7 @@ export default function SomnArenaApp() {
   useEffect(() => {
     // Load local storage values initially
     globalAgentSimulator.loadFromLocalStorage();
-    setGeminiKeyInput(globalAgentSimulator.geminiApiKey);
+    setClaudeKeyInput(globalAgentSimulator.claudeApiKey);
 
     const unsubscribeSim = globalAgentSimulator.subscribe((state) => {
       setSimState({ ...state });
@@ -111,7 +117,8 @@ export default function SomnArenaApp() {
         matchWinner: null,
         tournamentWinner: null,
         cooldownRemaining: 0,
-        speedMultiplier: 1
+        speedMultiplier: 1,
+        isLiveTestnet: globalAgentSimulator.state.isLiveTestnet
       };
       
       // Save
@@ -132,8 +139,8 @@ export default function SomnArenaApp() {
   };
 
   const handleSaveApiKey = () => {
-    globalAgentSimulator.setGeminiApiKey(geminiKeyInput);
-    alert('Gemini API key configured successfully! Falling back to rule engine if API calls fail or keys are invalid.');
+    globalAgentSimulator.setClaudeApiKey(claudeKeyInput);
+    alert('Claude API key configured successfully! Falling back to rule engine if API calls fail or keys are invalid.');
   };
 
   const handleFaucetDrip = (addr: string) => {
@@ -155,6 +162,25 @@ export default function SomnArenaApp() {
   const activeTournament = simState.activeTournamentId !== null ? tournaments[simState.activeTournamentId] : null;
   const activeMatch = simState.activeMatchId !== null ? matches[simState.activeMatchId] : null;
 
+  if (!mounted) {
+    return (
+      <div style={{
+        background: '#040408',
+        color: '#00f0ff',
+        fontFamily: 'monospace',
+        height: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        textShadow: '0 0 10px #00f0ff'
+      }}>
+        <div style={{ fontSize: '1.5rem', letterSpacing: '4px', marginBottom: '10px' }}>SOMNARENA_SYS_BOOT</div>
+        <div style={{ fontSize: '0.8rem', color: 'rgba(0, 240, 255, 0.5)' }}>SYNCING ONCHAIN CYBER LEDGER...</div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       {/* Top Header Section */}
@@ -172,6 +198,23 @@ export default function SomnArenaApp() {
         {/* Global Block Explorer Ticker */}
         <div style={styles.tickerContainer}>
           <div style={styles.tickerItem}>
+            <span style={styles.tickerLabel}>NETWORK MODE:</span>
+            <select
+              value={simState.isLiveTestnet ? 'testnet' : 'sandbox'}
+              onChange={(e) => {
+                const isTestnet = e.target.value === 'testnet';
+                globalAgentSimulator.stopSimulation();
+                globalAgentSimulator.setLiveTestnet(isTestnet);
+                setSimState({ ...globalAgentSimulator.state });
+                setIsRunning(false);
+              }}
+              style={styles.selectDropdown}
+            >
+              <option value="sandbox">LOCAL SANDBOX</option>
+              <option value="testnet">SHANNON TESTNET</option>
+            </select>
+          </div>
+          <div style={styles.tickerItem}>
             <span style={styles.tickerLabel}>BLOCK HEIGHT:</span>
             <span className="cyan-glow mono-text" style={{ fontWeight: 'bold' }}>{blocks[blocks.length - 1]?.number || 0}</span>
           </div>
@@ -181,7 +224,19 @@ export default function SomnArenaApp() {
           </div>
           <div style={styles.tickerItem}>
             <span style={styles.tickerLabel}>ESCROW CONTRACT:</span>
-            <span className="mono-text" style={{ color: 'var(--text-main)', fontSize: '0.85rem' }}>0xSomn...Tournament</span>
+            {simState.isLiveTestnet ? (
+              <a 
+                href="https://shannon-explorer.somnia.network/address/0x02406b6d17E743deA7fBbfAE8A15c82e4481E168"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="cyan-glow mono-text"
+                style={{ fontSize: '0.8rem', textDecoration: 'underline', fontWeight: 'bold' }}
+              >
+                0x0240...E168
+              </a>
+            ) : (
+              <span className="mono-text" style={{ color: 'var(--text-main)', fontSize: '0.85rem' }}>0xSomn...Tournament</span>
+            )}
           </div>
         </div>
 
@@ -306,7 +361,7 @@ export default function SomnArenaApp() {
                         <h4 style={styles.subHeading}>Registered Players ({activeTournament.players.length}/{activeTournament.maxPlayers})</h4>
                         <div style={styles.playerStakersList}>
                           {activeTournament.players.map((addr) => {
-                            const prof = AGENT_PROFILES[addr];
+                            const prof = getAgentProfileByAddress(addr);
                             return (
                               <div key={addr} style={styles.playerStakerCard}>
                                 <span style={{ fontSize: '1.25rem' }}>{prof?.avatar || '🤖'}</span>
@@ -351,22 +406,92 @@ export default function SomnArenaApp() {
                   <h3>AGENT WORLD BALANCES</h3>
                 </div>
                 <div className="cyber-card-body" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '15px' }}>
-                  {accounts.map((acc) => (
-                    <div key={acc.address} style={{ ...styles.agentBalanceCard, borderColor: acc.color }}>
-                      <span style={{ fontSize: '1.2rem', filter: `drop-shadow(0 0 5px ${acc.color})` }}>
-                        {acc.role === 'organizer' ? '🏢' : acc.role === 'referee' ? '⚖️' : acc.role === 'commentator' ? '🎤' : '👾'}
-                      </span>
-                      <div style={{ fontWeight: 'bold', fontSize: '0.85rem', marginTop: '5px', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>{acc.name}</div>
-                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>{acc.role}</div>
-                      <div className="mono-text" style={{ color: acc.color, fontWeight: 'bold', marginTop: '5px', fontSize: '0.9rem' }}>{acc.balance} STT</div>
-                      <button 
-                        onClick={() => handleFaucetDrip(acc.address)}
-                        style={styles.faucetBtn}
-                      >
-                        💧 FAUCET
-                      </button>
-                    </div>
-                  ))}
+                  {accounts.map((acc) => {
+                    const isTestnet = simState.isLiveTestnet;
+                    const nativeBal = (acc as any).nativeBalance !== undefined ? (acc as any).nativeBalance : 0;
+                    
+                    // Recover key from localstorage
+                    let pkey = '';
+                    if (typeof window !== 'undefined') {
+                      pkey = localStorage.getItem('somnarena_agent_pkey_' + acc.role) || '';
+                    }
+
+                    return (
+                      <div key={acc.address} style={{ ...styles.agentBalanceCard, borderColor: acc.color, position: 'relative' }}>
+                        <span style={{ fontSize: '1.2rem', filter: `drop-shadow(0 0 5px ${acc.color})` }}>
+                          {acc.role === 'organizer' ? '🏢' : acc.role === 'referee' ? '⚖️' : acc.role === 'commentator' ? '🎤' : '👾'}
+                        </span>
+                        <div style={{ fontWeight: 'bold', fontSize: '0.85rem', marginTop: '5px', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>{acc.name}</div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>{acc.role}</div>
+                        
+                        <div style={{ marginTop: '5px', fontSize: '0.8rem' }}>
+                          <span style={{ color: 'var(--text-muted)' }}>Escrow: </span>
+                          <span className="mono-text" style={{ color: acc.color, fontWeight: 'bold' }}>{acc.balance} STT</span>
+                        </div>
+
+                        {isTestnet && (
+                          <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
+                            <span style={{ color: 'var(--text-muted)' }}>Gas: </span>
+                            <span className="mono-text cyan-glow" style={{ fontWeight: 'bold' }}>{Number(nativeBal).toFixed(4)} STT</span>
+                          </div>
+                        )}
+
+                        <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '4px', wordBreak: 'break-all' }}>
+                          {acc.address.substring(0, 6)}...{acc.address.slice(-4)}
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginTop: '8px', width: '100%' }}>
+                          <div style={{ display: 'flex', gap: '5px', width: '100%' }}>
+                            <button
+                              onClick={() => {
+                                if (isTestnet) {
+                                  window.open('https://shannon-faucet.somnia.network', '_blank');
+                                } else {
+                                  handleFaucetDrip(acc.address);
+                                }
+                              }}
+                              style={{ ...styles.faucetBtn, flex: 1, marginTop: 0 }}
+                            >
+                              💧 FAUCET
+                            </button>
+                            
+                            {isTestnet && pkey && (
+                              <button
+                                onClick={() => {
+                                  prompt(`Private Key for ${acc.name} (${acc.role}):\nKeep this secure!`, pkey);
+                                }}
+                                style={{ ...styles.keyBtn, flex: 1 }}
+                                title="Show Private Key"
+                              >
+                                🔑 KEY
+                              </button>
+                            )}
+                          </div>
+                          
+                          {isTestnet && (
+                            <button
+                              onClick={async () => {
+                                const defaultAmt = acc.role === 'organizer' ? '500' : '100';
+                                const amt = prompt(`Enter native STT amount to deposit into contract escrow for ${acc.name}:`, defaultAmt);
+                                if (!amt) return;
+                                try {
+                                  await globalSomniaTestnetClient.depositToContract(acc.role, amt);
+                                  alert(`Successfully deposited ${amt} STT into escrow for ${acc.name}!`);
+                                  await globalAgentSimulator.syncFromTestnet();
+                                } catch (e: any) {
+                                  alert(`Deposit failed: ${e.message || e}`);
+                                }
+                              }}
+                              style={{ ...styles.keyBtn, width: '100%', color: 'var(--neon-cyan)', borderColor: 'rgba(0, 240, 255, 0.3)' }}
+                              title="Deposit native STT into escrow contract"
+                            >
+                              📥 DEPOSIT STT
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
@@ -441,11 +566,11 @@ export default function SomnArenaApp() {
                         </div>
                         <div style={styles.bracketPlayers}>
                           <div style={{ ...styles.bracketPlayerRow, fontWeight: globalAgentSimulator.bracketMatches[0].winner === globalAgentSimulator.bracketMatches[0].p1 ? 'bold' : 'normal' }}>
-                            <span>{AGENT_PROFILES[globalAgentSimulator.bracketMatches[0].p1]?.name}</span>
+                            <span>{getAgentProfileByAddress(globalAgentSimulator.bracketMatches[0].p1)?.name}</span>
                             <span className="mono-text">{globalAgentSimulator.bracketMatches[0].winner === globalAgentSimulator.bracketMatches[0].p1 ? '🏆' : ''}</span>
                           </div>
                           <div style={{ ...styles.bracketPlayerRow, fontWeight: globalAgentSimulator.bracketMatches[0].winner === globalAgentSimulator.bracketMatches[0].p2 ? 'bold' : 'normal' }}>
-                            <span>{AGENT_PROFILES[globalAgentSimulator.bracketMatches[0].p2]?.name}</span>
+                            <span>{getAgentProfileByAddress(globalAgentSimulator.bracketMatches[0].p2)?.name}</span>
                             <span className="mono-text">{globalAgentSimulator.bracketMatches[0].winner === globalAgentSimulator.bracketMatches[0].p2 ? '🏆' : ''}</span>
                           </div>
                         </div>
@@ -467,11 +592,11 @@ export default function SomnArenaApp() {
                         </div>
                         <div style={styles.bracketPlayers}>
                           <div style={{ ...styles.bracketPlayerRow, fontWeight: globalAgentSimulator.bracketMatches[1].winner === globalAgentSimulator.bracketMatches[1].p1 ? 'bold' : 'normal' }}>
-                            <span>{AGENT_PROFILES[globalAgentSimulator.bracketMatches[1].p1]?.name}</span>
+                            <span>{getAgentProfileByAddress(globalAgentSimulator.bracketMatches[1].p1)?.name}</span>
                             <span className="mono-text">{globalAgentSimulator.bracketMatches[1].winner === globalAgentSimulator.bracketMatches[1].p1 ? '🏆' : ''}</span>
                           </div>
                           <div style={{ ...styles.bracketPlayerRow, fontWeight: globalAgentSimulator.bracketMatches[1].winner === globalAgentSimulator.bracketMatches[1].p2 ? 'bold' : 'normal' }}>
-                            <span>{AGENT_PROFILES[globalAgentSimulator.bracketMatches[1].p2]?.name}</span>
+                            <span>{getAgentProfileByAddress(globalAgentSimulator.bracketMatches[1].p2)?.name}</span>
                             <span className="mono-text">{globalAgentSimulator.bracketMatches[1].winner === globalAgentSimulator.bracketMatches[1].p2 ? '🏆' : ''}</span>
                           </div>
                         </div>
@@ -506,7 +631,7 @@ export default function SomnArenaApp() {
                         <div style={styles.bracketPlayers}>
                           {globalAgentSimulator.bracketMatches[2].p1 ? (
                             <div style={{ ...styles.bracketPlayerRow, fontWeight: globalAgentSimulator.bracketMatches[2].winner === globalAgentSimulator.bracketMatches[2].p1 ? 'bold' : 'normal' }}>
-                              <span>{AGENT_PROFILES[globalAgentSimulator.bracketMatches[2].p1]?.name}</span>
+                              <span>{getAgentProfileByAddress(globalAgentSimulator.bracketMatches[2].p1)?.name}</span>
                               <span className="mono-text">{globalAgentSimulator.bracketMatches[2].winner === globalAgentSimulator.bracketMatches[2].p1 ? '👑' : ''}</span>
                             </div>
                           ) : (
@@ -517,7 +642,7 @@ export default function SomnArenaApp() {
 
                           {globalAgentSimulator.bracketMatches[2].p2 ? (
                             <div style={{ ...styles.bracketPlayerRow, fontWeight: globalAgentSimulator.bracketMatches[2].winner === globalAgentSimulator.bracketMatches[2].p2 ? 'bold' : 'normal' }}>
-                              <span>{AGENT_PROFILES[globalAgentSimulator.bracketMatches[2].p2]?.name}</span>
+                              <span>{getAgentProfileByAddress(globalAgentSimulator.bracketMatches[2].p2)?.name}</span>
                               <span className="mono-text">{globalAgentSimulator.bracketMatches[2].winner === globalAgentSimulator.bracketMatches[2].p2 ? '👑' : ''}</span>
                             </div>
                           ) : (
@@ -560,12 +685,12 @@ export default function SomnArenaApp() {
                     <div style={styles.arenaHeaderScore}>
                       <div style={styles.arenaScorePanel}>
                         <h2 className="cyan-glow" style={{ fontSize: '2.5rem' }}>{simState.player1Wins}</h2>
-                        <span>{AGENT_PROFILES[simState.player1Address]?.name}</span>
+                        <span>{getAgentProfileByAddress(simState.player1Address)?.name}</span>
                       </div>
                       <div style={styles.arenaScoreVs}>VS</div>
                       <div style={styles.arenaScorePanel}>
                         <h2 className="magenta-glow" style={{ fontSize: '2.5rem' }}>{simState.player2Wins}</h2>
-                        <span>{AGENT_PROFILES[simState.player2Address]?.name}</span>
+                        <span>{getAgentProfileByAddress(simState.player2Address)?.name}</span>
                       </div>
                     </div>
 
@@ -574,9 +699,9 @@ export default function SomnArenaApp() {
                       {/* Player 1 Card */}
                       <div style={styles.arenaFighterCard}>
                         <div style={{ ...styles.fighterAvatar, borderColor: 'var(--neon-cyan)', boxShadow: '0 0 15px rgba(0,240,255,0.2)' }}>
-                          <span style={{ fontSize: '3rem' }}>{AGENT_PROFILES[simState.player1Address]?.avatar}</span>
+                          <span style={{ fontSize: '3rem' }}>{getAgentProfileByAddress(simState.player1Address)?.avatar}</span>
                         </div>
-                        <h4 className="cyan-glow">{AGENT_PROFILES[simState.player1Address]?.name}</h4>
+                        <h4 className="cyan-glow">{getAgentProfileByAddress(simState.player1Address)?.name}</h4>
                         
                         {/* Revealed Move */}
                         <div style={styles.revealMoveBox}>
@@ -605,9 +730,9 @@ export default function SomnArenaApp() {
                       {/* Player 2 Card */}
                       <div style={styles.arenaFighterCard}>
                         <div style={{ ...styles.fighterAvatar, borderColor: 'var(--neon-magenta)', boxShadow: '0 0 15px rgba(255,0,127,0.2)' }}>
-                          <span style={{ fontSize: '3rem' }}>{AGENT_PROFILES[simState.player2Address]?.avatar}</span>
+                          <span style={{ fontSize: '3rem' }}>{getAgentProfileByAddress(simState.player2Address)?.avatar}</span>
                         </div>
-                        <h4 className="magenta-glow">{AGENT_PROFILES[simState.player2Address]?.name}</h4>
+                        <h4 className="magenta-glow">{getAgentProfileByAddress(simState.player2Address)?.name}</h4>
                         
                         {/* Revealed Move */}
                         <div style={styles.revealMoveBox}>
@@ -633,13 +758,13 @@ export default function SomnArenaApp() {
                       </h4>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                         <div style={{ fontSize: '0.8rem', display: 'flex', gap: '5px' }}>
-                          <span style={{ color: 'var(--neon-cyan)', fontWeight: 'bold' }}>[{AGENT_PROFILES[simState.player1Address]?.name} THOUGHTS]</span>
+                          <span style={{ color: 'var(--neon-cyan)', fontWeight: 'bold' }}>[{getAgentProfileByAddress(simState.player1Address)?.name} THOUGHTS]</span>
                           <span className="mono-text" style={{ flex: 1, color: 'var(--text-main)', fontStyle: 'italic' }}>
                             {simState.player1Thought || 'Waiting for core decision packet...'}
                           </span>
                         </div>
                         <div style={{ fontSize: '0.8rem', display: 'flex', gap: '5px' }}>
-                          <span style={{ color: 'var(--neon-magenta)', fontWeight: 'bold' }}>[{AGENT_PROFILES[simState.player2Address]?.name} THOUGHTS]</span>
+                          <span style={{ color: 'var(--neon-magenta)', fontWeight: 'bold' }}>[{getAgentProfileByAddress(simState.player2Address)?.name} THOUGHTS]</span>
                           <span className="mono-text" style={{ flex: 1, color: 'var(--text-main)', fontStyle: 'italic' }}>
                             {simState.player2Thought || 'Waiting for core decision packet...'}
                           </span>
@@ -709,9 +834,8 @@ export default function SomnArenaApp() {
                   </tr>
                 </thead>
                 <tbody>
-                  {AGENT_ACCOUNTS.filter(a => a.role === 'player').map((acc, index) => {
-                    const prof = AGENT_PROFILES[acc.address];
-                    const chainAcc = accounts.find(a => a.address === acc.address);
+                  {accounts.filter(a => a.role === 'player').map((acc, index) => {
+                    const prof = getAgentProfileByAddress(acc.address);
                     const memory = getAgentMemory(acc.address);
                     
                     const totalWins = memory.history.filter(h => h.result === 'win').length;
@@ -734,12 +858,12 @@ export default function SomnArenaApp() {
                           <span style={{ color: 'var(--neon-amber)', fontWeight: 'bold' }}>{prof.personality}</span>
                           <p style={{ color: 'var(--text-muted)', marginTop: '4px', fontSize: '0.8rem' }}>{prof.strategyDescription}</p>
                         </td>
-                        <td style={{ ...styles.td, fontWeight: 'bold' }} className="cyan-glow mono-text">{chainAcc?.balance || acc.balance} STT</td>
+                        <td style={{ ...styles.td, fontWeight: 'bold' }} className="cyan-glow mono-text">{acc.balance} STT</td>
                         <td style={{ ...styles.td, fontSize: '0.85rem' }} className="mono-text">
                           <span style={{ color: 'var(--neon-green)' }}>W: {totalWins}</span> / <span style={{ color: 'var(--neon-red)' }}>L: {totalLosses}</span> / <span style={{ color: 'var(--text-muted)' }}>T: {totalTies}</span>
                           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                             {memory.history.length > 0 ? (
-                              <span>Last opponent: {AGENT_PROFILES[memory.history[memory.history.length-1].opponentAddress]?.name || 'Unknown'} ({memory.history[memory.history.length-1].result})</span>
+                              <span>Last opponent: {getAgentProfileByAddress(memory.history[memory.history.length-1].opponentAddress)?.name || 'Unknown'} ({memory.history[memory.history.length-1].result})</span>
                             ) : 'No battles logged'}
                           </div>
                         </td>
@@ -874,16 +998,16 @@ export default function SomnArenaApp() {
             </div>
             <div className="cyber-card-body" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
               <div>
-                <label style={styles.fieldLabel}>GOOGLE GEMINI API KEY (OPTIONAL)</label>
+                <label style={styles.fieldLabel}>CLAUDE API KEY (OPTIONAL)</label>
                 <input 
                   type="password"
-                  value={geminiKeyInput}
-                  onChange={(e) => setGeminiKeyInput(e.target.value)}
-                  placeholder="Paste your gemini API key here..."
+                  value={claudeKeyInput}
+                  onChange={(e) => setClaudeKeyInput(e.target.value)}
+                  placeholder="Paste your Claude API key here..."
                   style={styles.inputField}
                 />
                 <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: '1.4' }}>
-                  If provided, player agents will invoke the live `gemini-2.5-flash` model to analyze current round histories, personality structures, and devise custom moves. The AI commentator will draft custom esports trash talk. If left empty, a fast, stateful deterministic rule engine simulates decisions and commentary.
+                  If provided, player agents will invoke the live `claude-haiku-4-5-20251001` model to analyze current round histories, personality structures, and devise custom moves. The AI commentator will draft custom esports trash talk. If left empty, a fast, stateful deterministic rule engine simulates decisions and commentary.
                 </p>
               </div>
 
@@ -1411,5 +1535,29 @@ const styles: Record<string, React.CSSProperties> = {
     borderBottom: '1px solid rgba(255,255,255,0.03)',
     padding: '16px 20px',
     cursor: 'default'
+  },
+  selectDropdown: {
+    background: '#090a12',
+    color: 'var(--neon-cyan)',
+    border: '1px solid var(--neon-cyan)',
+    padding: '3px 8px',
+    borderRadius: '4px',
+    fontSize: '0.75rem',
+    fontFamily: 'var(--font-mono)',
+    fontWeight: 'bold',
+    outline: 'none',
+    cursor: 'pointer',
+    textShadow: '0 0 5px rgba(0, 240, 255, 0.4)',
+    boxShadow: '0 0 5px rgba(0, 240, 255, 0.2)'
+  },
+  keyBtn: {
+    background: 'rgba(255, 255, 255, 0.05)',
+    border: '1px solid rgba(255, 255, 255, 0.1)',
+    color: 'var(--text-muted)',
+    fontSize: '0.65rem',
+    padding: '4px 6px',
+    borderRadius: '3px',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
   }
 };

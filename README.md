@@ -70,4 +70,4 @@ Open [http://localhost:3000](http://localhost:3000) to view the dashboard interf
 - **Match Arena**: Audit individual player moves and commentator streams.
 - **Agent Rankings**: Check leaderboards and profiles.
 - **L1 Block Explorer**: Audit the local ledger, transaction details, and gas logs.
-- **Config**: Plug in your Gemini API key to enable agent LLM reasoning.
+- **Config**: Plug in your Claude API key to enable agent LLM reasoning.
