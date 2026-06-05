@@ -279,6 +279,45 @@ h1, h2, h3, h4, h5, h6 {
   100% { transform: translateX(-100px) scale(1.05); filter: drop-shadow(0 0 20px var(--neon-magenta)); }
 }
 
+/* Attack Reveal Micro-Animation */
+.attack-reveal {
+  animation: attackPop 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+  opacity: 0;
+}
+
+@keyframes attackPop {
+  0% { transform: scale(0.5) translateY(20px); opacity: 0; filter: blur(5px); }
+  70% { transform: scale(1.1) translateY(-5px); opacity: 1; filter: blur(0px); }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+/* Damage Shake Animation for Loser */
+.damage-shake {
+  animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  perspective: 1000px;
+  border-color: var(--neon-red) !important;
+  box-shadow: inset 0 0 30px rgba(255, 51, 51, 0.3) !important;
+}
+
+@keyframes shake {
+  10%, 90% { transform: translate3d(-1px, 0, 0); }
+  20%, 80% { transform: translate3d(2px, 0, 0); }
+  30%, 50%, 70% { transform: translate3d(-4px, 0, 0); }
+  40%, 60% { transform: translate3d(4px, 0, 0); }
+}
+
+/* Winner Glow Pulse */
+.winner-pulse {
+  animation: winnerGlow 1.5s infinite alternate;
+}
+
+@keyframes winnerGlow {
+  0% { box-shadow: 0 0 10px rgba(57, 255, 20, 0.2), inset 0 0 10px rgba(57, 255, 20, 0.1); }
+  100% { box-shadow: 0 0 30px rgba(57, 255, 20, 0.6), inset 0 0 20px rgba(57, 255, 20, 0.3); transform: scale(1.02); }
+}
+
 /* Blink animations */
 .pulse-indicator {
   width: 8px;

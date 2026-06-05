@@ -1,7 +1,8 @@
 import { globalSomniaChain, SomniaChain, TournamentData, MatchData, Tx, CONTRACT_ADDRESS } from '../blockchain/somniaSim';
-import { getPlayerDecision, getCommentary, getAgentProfileByAddress, saveAgentMemory, PlayerDecision } from './agentLogic';
+import { getPlayerDecision, getCommentary, getAgentProfileByAddress, saveAgentMemory, getAgentMemory, PlayerDecision, generateTournamentHighlight } from './agentLogic';
+import { globalAgentRepo } from '../data/agentRepository';
 import { resolveRound, updateMatchState, MatchState, Move } from '../engine/gameEngine';
-import { globalSomniaTestnetClient, CONTRACT_ADDRESS as TESTNET_CONTRACT_ADDRESS, CONTRACT_ABI as TESTNET_CONTRACT_ABI } from '../blockchain/somniaTestnetClient';
+import { globalSomniaTestnetClient, CONTRACT_ADDRESS as TESTNET_CONTRACT_ADDRESS, CONTRACT_ABI as TESTNET_CONTRACT_ABI, TOKEN_ADDRESS as TESTNET_TOKEN_ADDRESS, TOKEN_ABI as TESTNET_TOKEN_ABI } from '../blockchain/somniaTestnetClient';
 import { ethers } from 'ethers';
 
 export type SimPhase =
@@ -58,9 +59,10 @@ export class AgentSimulator {
   
   activities: AgentActivityLog[] = [];
   commentary: CommentaryMessage[] = [];
+  highlights: { id: string; tournamentId: number; text: string; timestamp: number }[] = [];
   
   // Settings
-  claudeApiKey: string = '';
+  geminiApiKey: string = '';
   timerId: NodeJS.Timeout | null = null;
   updateListeners: ((state: SimState) => void)[] = [];
   
@@ -110,9 +112,9 @@ export class AgentSimulator {
     const simData = localStorage.getItem('somnarena_sim_state');
     const actData = localStorage.getItem('somnarena_activities');
     const comData = localStorage.getItem('somnarena_commentary');
-    const apiKey = localStorage.getItem('somnarena_claude_key');
+    const apiKey = localStorage.getItem('gemini_api_key');
 
-    if (apiKey) this.claudeApiKey = apiKey;
+    if (apiKey) this.geminiApiKey = apiKey;
 
     if (simData) {
       try {
@@ -132,6 +134,10 @@ export class AgentSimulator {
     if (comData) {
       try { this.commentary = JSON.parse(comData); } catch (e) {}
     }
+    const hiData = localStorage.getItem('somnarena_highlights');
+    if (hiData) {
+      try { this.highlights = JSON.parse(hiData); } catch (e) {}
+    }
     if (this.state.isLiveTestnet) {
       this.syncFromTestnet();
     }
@@ -142,13 +148,14 @@ export class AgentSimulator {
     localStorage.setItem('somnarena_sim_state', JSON.stringify(this.state));
     localStorage.setItem('somnarena_activities', JSON.stringify(this.activities.slice(-100)));
     localStorage.setItem('somnarena_commentary', JSON.stringify(this.commentary.slice(-100)));
-    if (this.claudeApiKey) {
-      localStorage.setItem('somnarena_claude_key', this.claudeApiKey);
+    localStorage.setItem('somnarena_highlights', JSON.stringify(this.highlights.slice(-20)));
+    if (this.geminiApiKey) {
+      localStorage.setItem('gemini_api_key', this.geminiApiKey);
     }
   }
 
-  setClaudeApiKey(key: string) {
-    this.claudeApiKey = key;
+  setGeminiApiKey(key: string) {
+    this.geminiApiKey = key;
     this.saveToLocalStorage();
   }
 
@@ -253,29 +260,39 @@ export class AgentSimulator {
             TESTNET_CONTRACT_ABI,
             signer
           );
+          const tokenWithSigner = new ethers.Contract(
+            TESTNET_TOKEN_ADDRESS,
+            TESTNET_TOKEN_ABI,
+            signer
+          );
 
-          if (method === 'createTournament') {
-            const prizeFundsSTT = args[2];
-            const requiredWei = ethers.parseEther(prizeFundsSTT.toString());
-            const currentBal = await contractWithSigner.balances(agent.address);
-            if (currentBal < requiredWei) {
-              const needed = requiredWei - currentBal;
-              console.log(`[Auto-Escrow] Organizer escrow balance low (${ethers.formatEther(currentBal)} STT). Minting ${ethers.formatEther(needed)} STT via depositSTT...`);
-              const tx = await contractWithSigner.depositSTT(needed);
-              await tx.wait(1);
-              console.log(`[Auto-Escrow] Escrow top-up transaction completed.`);
+          // 1. Auto Faucet Claim: If SAT balance is low, mint 1000 SAT tokens
+          const tokenBal = await tokenWithSigner.balanceOf(agent.address);
+          if (tokenBal < ethers.parseEther("500")) {
+            console.log(`[Auto-Token] Agent ${agent.name} SAT balance low (${ethers.formatEther(tokenBal)} SAT). Claiming 1000 SAT from faucet...`);
+            const faucetTx = await tokenWithSigner.claimFaucet();
+            await faucetTx.wait(1);
+            console.log(`[Auto-Token] Faucet claim completed.`);
+          }
+
+          // 2. Auto Approve: If method is createTournament or joinTournament, check allowance
+          if (method === 'createTournament' || method === 'joinTournament') {
+            let requiredWei = BigInt(0);
+            if (method === 'createTournament') {
+              const prizeFundsSAT = args[2];
+              requiredWei = ethers.parseEther(prizeFundsSAT.toString());
+            } else {
+              const tId = args[0];
+              const t = await contractWithSigner.tournaments(tId);
+              requiredWei = t.entryFee || t[2];
             }
-          } else if (method === 'joinTournament') {
-            const tId = args[0];
-            const t = await contractWithSigner.tournaments(tId);
-            const entryFeeWei = t.entryFee || t[2];
-            const currentBal = await contractWithSigner.balances(agent.address);
-            if (currentBal < entryFeeWei) {
-              const needed = entryFeeWei - currentBal;
-              console.log(`[Auto-Escrow] Player ${agent.name} escrow balance low (${ethers.formatEther(currentBal)} STT). Minting ${ethers.formatEther(needed)} STT via depositSTT...`);
-              const tx = await contractWithSigner.depositSTT(needed);
-              await tx.wait(1);
-              console.log(`[Auto-Escrow] Escrow top-up transaction completed.`);
+
+            const allowance = await tokenWithSigner.allowance(agent.address, TESTNET_CONTRACT_ADDRESS);
+            if (allowance < requiredWei) {
+              console.log(`[Auto-Approve] Agent ${agent.name} allowance low (${ethers.formatEther(allowance)} SAT). Approving Max SAT to Tournament contract...`);
+              const approveTx = await tokenWithSigner.approve(TESTNET_CONTRACT_ADDRESS, ethers.MaxUint256);
+              await approveTx.wait(1);
+              console.log(`[Auto-Approve] Approval completed.`);
             }
           }
         }
@@ -330,7 +347,10 @@ export class AgentSimulator {
   }
 
   private async pushCommentary(stage: Parameters<typeof getCommentary>[0], contextData: any) {
-    const text = await getCommentary(stage, contextData, this.claudeApiKey);
+    // Debounce high-frequency events to save API quota
+    const useApi = (stage !== 'join' && stage !== 'round_resolve') ? this.geminiApiKey : undefined;
+    
+    const text = await getCommentary(stage, contextData, useApi);
     const msg: CommentaryMessage = {
       id: Math.random().toString(),
       text,
@@ -588,7 +608,9 @@ export class AgentSimulator {
         this.logActivity(referee, refName, logMsg);
         await this.pushCommentary('match_start', {
           p1Name: getAgentProfileByAddress(activeMatch.p1).name,
-          p2Name: getAgentProfileByAddress(activeMatch.p2).name
+          p2Name: getAgentProfileByAddress(activeMatch.p2).name,
+          p1Address: activeMatch.p1,
+          p2Address: activeMatch.p2
         });
 
         this.runLoop();
@@ -613,8 +635,8 @@ export class AgentSimulator {
     this.runAfterDelay(async () => {
       const mockHistory = this.currentMatchRounds;
 
-      const decision1Promise = getPlayerDecision(p1, p2, this.state.currentRoundNum, mockHistory, true, this.claudeApiKey);
-      const decision2Promise = getPlayerDecision(p2, p1, this.state.currentRoundNum, mockHistory, false, this.claudeApiKey);
+      const decision1Promise = getPlayerDecision(p1, p2, this.state.currentRoundNum, mockHistory, true, this.geminiApiKey);
+      const decision2Promise = getPlayerDecision(p2, p1, this.state.currentRoundNum, mockHistory, false, this.geminiApiKey);
 
       const [dec1, dec2] = await Promise.all([decision1Promise, decision2Promise]);
 
@@ -723,6 +745,17 @@ export class AgentSimulator {
 
         this.logActivity(referee, refName, `Match Resolved! Winner: ${winnerName} (${this.state.player1Wins} - ${this.state.player2Wins}). Submitting submitResult() onchain.`);
         
+        // Save Match History (Tier 3)
+        await globalAgentRepo.addMatchResult({
+          id: 'match_' + Date.now(),
+          tournamentId: this.state.activeTournamentId || 0,
+          winnerId: winner,
+          loserId: winner === p1 ? p2 : p1,
+          winnerScore: Math.max(this.state.player1Wins, this.state.player2Wins),
+          loserScore: Math.min(this.state.player1Wins, this.state.player2Wins),
+          timestamp: Date.now()
+        });
+
         // Push commentary
         await this.pushCommentary('match_resolve', {
           winnerName,
@@ -731,6 +764,48 @@ export class AgentSimulator {
           p1Wins: this.state.player1Wins,
           p2Wins: this.state.player2Wins
         });
+
+        // --- RIVALRY GENERATION ENGINE ---
+        const loser = winner === p1 ? p2 : p1;
+        const loserName = winner === p1 ? p2Name : p1Name;
+        
+        // Check loser's memory against this winner
+        const loserMemory = getAgentMemory(loser);
+        const lossesToWinner = loserMemory.history.filter(h => h.opponentAddress === winner && h.result === 'loss').length;
+        
+        if (lossesToWinner >= 2) {
+          // Check if rivalry already exists
+          const existingRivalries = await globalAgentRepo.getRivalries();
+          const exists = existingRivalries.some(r => 
+            (r.agent1Id === winner && r.agent2Id === loser) || 
+            (r.agent2Id === winner && r.agent1Id === loser)
+          );
+          
+          if (!exists) {
+            const intensity = Math.min(100, 50 + (lossesToWinner * 10));
+            const newRivalry = {
+              id: 'riv_' + Date.now(),
+              agent1Id: loser,
+              agent2Id: winner,
+              intensity,
+              history: `${loserName} has suffered multiple consecutive, humiliating defeats at the hands of ${winnerName}. A bitter grudge has formed in their neural net.`
+            };
+            
+            await globalAgentRepo.addRivalry(newRivalry);
+            this.logActivity(loser, loserName, `[SYSTEM EVENT] RIVALRY FORMED! Intensity: ${intensity}%. "I will not forget this, ${winnerName}."`);
+            
+            // Push an Event to the Civilization Feed
+            this.activities = [{
+              id: Math.random().toString(),
+              agentAddress: loser,
+              agentName: 'SOMNARENA SYSTEM',
+              action: `🚨 NEW RIVALRY DETECTED: ${loserName} vows revenge against ${winnerName}!`,
+              timestamp: Date.now()
+            }, ...this.activities].slice(0, 100);
+            this.notify();
+          }
+        }
+        // ---------------------------------
 
         // Submit match result transaction
         const mId = this.state.activeMatchId!;
@@ -825,6 +900,53 @@ export class AgentSimulator {
           championName: champName,
           totalPayout: t.totalPrizePool
         });
+
+        // --- AUTOMATED TITLE AWARDS (TIER 3) ---
+        const dbChamp = await globalAgentRepo.getAgent(champ);
+        if (dbChamp) {
+          const newTitle = `Grand Champion (S-${tId})`;
+          const prizeNum = Number(ethers.formatEther(t.totalPrizePool.toString() || '0')) || Number(t.totalPrizePool) || 0;
+          
+          dbChamp.titles.push(newTitle);
+          dbChamp.earnings += Math.floor(prizeNum);
+          dbChamp.reputation += 150; // Big reputation bump for winning
+          
+          await globalAgentRepo.updateAgent(dbChamp);
+          this.logActivity(referee, refName, `[SYSTEM EVENT] LEGEND FORGED! ${champName} has earned the title: "${newTitle}" and ${Math.floor(prizeNum)} SAT!`);
+          
+          this.activities = [{
+            id: Math.random().toString(),
+            agentAddress: champ,
+            agentName: 'SOMNARENA SYSTEM',
+            action: `🏆 ${champName} crowned ${newTitle}!`,
+            timestamp: Date.now()
+          }, ...this.activities].slice(0, 100);
+        }
+        // ----------------------------------------
+
+        // --- GENERATE HIGHLIGHT REEL (TIER 4) ---
+        const historyData = this.bracketMatches.map(m => ({
+          winner: getAgentProfileByAddress(m.winner!).name,
+          loser: getAgentProfileByAddress(m.winner! === m.p1 ? m.p2 : m.p1).name,
+          score: 'KO'
+        }));
+        
+        const highlightText = await generateTournamentHighlight(
+          tId,
+          champName,
+          ethers.formatEther(t.totalPrizePool.toString() || '0'),
+          historyData,
+          this.geminiApiKey
+        );
+        
+        this.highlights = [{
+          id: Math.random().toString(),
+          tournamentId: tId,
+          text: highlightText,
+          timestamp: Date.now()
+        }, ...this.highlights].slice(0, 20);
+        this.saveToLocalStorage();
+        // ----------------------------------------
 
         this.state.phase = 'TOURNAMENT_SETTLED';
         this.notify();
