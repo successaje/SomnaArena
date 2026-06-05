@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { useSimulation } from '../../hooks/useSimulation';
 import { globalAgentRepo, Agent } from '../../data/agentRepository';
 import Link from 'next/link';
+import PredictionWidget from '../../components/PredictionWidget';
 
 export default function DashboardPage() {
   const { simState, activities, commentary, highlights, tournaments, accounts } = useSimulation();
@@ -87,6 +88,9 @@ export default function DashboardPage() {
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>No active tournament. Awaiting Organizer.</div>
           )}
         </div>
+
+        {/* Prediction Slip Widget */}
+        <PredictionWidget />
 
         {/* Agent Roster */}
         <div className="terminal-panel" style={{ padding: '20px', flex: 1, overflowY: 'auto' }}>

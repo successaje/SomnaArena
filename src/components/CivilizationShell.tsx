@@ -7,7 +7,7 @@ import { useSimulation } from '../hooks/useSimulation';
 
 export function CivilizationShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { simState, blocks, gasPrice, isRunning, toggleSimulation, resetChain, setGeminiApiKey } = useSimulation();
+  const { simState, blocks, gasPrice, isRunning, toggleSimulation, resetChain, setGeminiApiKey, toggleLiveTestnet } = useSimulation();
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -102,6 +102,23 @@ export function CivilizationShell({ children }: { children: React.ReactNode }) {
               }}
             >
               {isRunning ? 'PAUSE CIVILIZATION' : 'START CIVILIZATION'}
+            </button>
+            <button 
+              onClick={toggleLiveTestnet} 
+              style={{
+                background: simState.isLiveTestnet ? 'var(--neon-magenta)' : 'transparent',
+                color: simState.isLiveTestnet ? '#000' : 'var(--neon-magenta)',
+                border: '1px solid var(--neon-magenta)',
+                padding: '10px',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontFamily: 'monospace',
+                fontSize: '0.8rem',
+                fontWeight: 'bold',
+                marginTop: '10px'
+              }}
+            >
+              {simState.isLiveTestnet ? 'L1 NETWORK: ACTIVE' : 'SWITCH TO TESTNET L1'}
             </button>
             <button 
               onClick={resetChain}

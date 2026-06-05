@@ -1,8 +1,8 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { globalAgentSimulator, SimState, AgentActivityLog, CommentaryMessage } from '../agents/agentSystem';
-import { globalSomniaChain, Block, TxEvent, Account, TournamentData, MatchData } from '../blockchain/somniaSim';
+import { globalAgentSimulator, SimState, AgentActivityLog, CommentaryMessage, PredictionType } from '../agents/agentSystem';
+import { globalSomniaChain, Block, ChainEvent, Account, TournamentData, MatchData } from '../blockchain/somniaSim';
 
 interface SimulationContextProps {
   simState: SimState;
@@ -11,7 +11,7 @@ interface SimulationContextProps {
   highlights: { id: string; tournamentId: number; text: string; timestamp: number }[];
   isRunning: boolean;
   blocks: Block[];
-  events: TxEvent[];
+  events: ChainEvent[];
   accounts: Account[];
   tournaments: Record<number, TournamentData>;
   matches: Record<number, MatchData>;
@@ -19,6 +19,8 @@ interface SimulationContextProps {
   toggleSimulation: () => void;
   resetChain: () => void;
   setGeminiApiKey: (key: string) => void;
+  toggleLiveTestnet: () => void;
+  placePrediction: (type: PredictionType, targetAddress: string, stake: number, multiplier: number, targetValue?: number) => void;
 }
 
 const SimulationContext = createContext<SimulationContextProps | undefined>(undefined);
@@ -31,7 +33,7 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
   const [isRunning, setIsRunning] = useState<boolean>(globalAgentSimulator.timerId !== null);
   
   const [blocks, setBlocks] = useState<Block[]>(globalSomniaChain.blocks);
-  const [events, setEvents] = useState<TxEvent[]>(globalSomniaChain.events);
+  const [events, setEvents] = useState<ChainEvent[]>(globalSomniaChain.events);
   const [accounts, setAccounts] = useState<Account[]>(globalSomniaChain.accounts);
   const [tournaments, setTournaments] = useState<Record<number, TournamentData>>(globalSomniaChain.tournaments);
   const [matches, setMatches] = useState<Record<number, MatchData>>(globalSomniaChain.matches);
@@ -97,6 +99,9 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
         matchWinner: null,
         tournamentWinner: null,
         cooldownRemaining: 0,
+        observerBalance: 1000,
+        activePredictions: [],
+        predictionHistory: []
       };
       
       globalSomniaChain.saveToLocalStorage();
@@ -112,6 +117,14 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
       setSimState(globalAgentSimulator.state);
       setIsRunning(false);
     }
+  };
+
+  const toggleLiveTestnet = () => {
+    globalAgentSimulator.setLiveTestnet(!simState.isLiveTestnet);
+  };
+
+  const placePrediction = (type: PredictionType, targetAddress: string, stake: number, multiplier: number, targetValue?: number) => {
+    globalAgentSimulator.placePrediction(type, targetAddress, stake, multiplier, targetValue);
   };
 
   return (
@@ -130,7 +143,9 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
         gasPrice,
         toggleSimulation,
         resetChain,
-        setGeminiApiKey: (key: string) => globalAgentSimulator.setGeminiApiKey(key)
+        setGeminiApiKey: (key: string) => globalAgentSimulator.setGeminiApiKey(key),
+        toggleLiveTestnet,
+        placePrediction
       }}
     >
       {children}
