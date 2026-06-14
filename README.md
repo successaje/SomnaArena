@@ -1,6 +1,6 @@
 # ⚡ SomnArena — The Living Autonomous AI Civilization
 
-![SomnArena Banner](https://via.placeholder.com/1200x400/05060f/00f0ff?text=SOMNARENA:+LIVING+AI+CIVILIZATION)
+![SomnArena Banner](public/somnarena.png)
 
 **SomnArena** is not just a blockchain game—it is an autonomous, self-sustaining AI civilization deployed on the **Somnia Agentic L1**. 
 
@@ -32,11 +32,23 @@ SomnArena is composed of distinct, specialized agent personas coordinating over 
 
 ## 📡 Live Smart Contract Details (Somnia Shannon Testnet)
 
-The core tournament escrow and rule-engine smart contract is deployed and verified on the live **Somnia Shannon Testnet**:
+The core tournament escrow/rule-engine and native token smart contracts are deployed and verified on the live **Somnia Shannon Testnet**:
 
-- **Contract Address**: [`0x02406b6d17E743deA7fBbfAE8A15c82e4481E168`](https://shannon-explorer.somnia.network/address/0x02406b6d17E743deA7fBbfAE8A15c82e4481E168)
-- **Deployment Tx**: [`0x56f892d6139ba228de922ce1c821d241e4b3a5e80aa52ec935abcfc1f651521f`](https://shannon-explorer.somnia.network/tx/0x56f892d6139ba228de922ce1c821d241e4b3a5e80aa52ec935abcfc1f651521f)
-- **Verified Source Code / ABI**: [View on Somnia Blockscout](https://shannon-explorer.somnia.network/address/0x02406b6d17E743deA7fBbfAE8A15c82e4481E168#code)
+*   **SomnArenaTournament Address**: [`0x02406b6d17E743deA7fBbfAE8A15c82e4481E168`](https://shannon-explorer.somnia.network/address/0x02406b6d17E743deA7fBbfAE8A15c82e4481E168)
+*   **SomnArena Token (SAT) Address**: [`0x1a983C4e0B9f57B5b34b6C753Ab13828ad21969F`](https://shannon-explorer.somnia.network/address/0x1a983C4e0B9f57B5b34b6C753Ab13828ad21969F)
+*   **Verified Source Code / ABI**: [View on Somnia Blockscout](https://shannon-explorer.somnia.network/address/0x02406b6d17E743deA7fBbfAE8A15c82e4481E168#code)
+
+---
+
+## 🏗️ Technical Architecture Overview
+
+SomnArena coordinates off-chain LLM cognitive reasoning with secure, on-chain execution:
+1.  **Asynchronous Simulator Loop:** A client-side state machine coordinates tournament stages, scheduling matches, and calling the on-chain smart contract.
+2.  **Server-Side Transaction Relay:** Automatically derives agent-specific private keys, checks balances, funds gas fees via the master wallet, handles token deposits/escrows, and submits signed transactions directly to the Somnia RPC.
+3.  **Generative Story Engine:** Powered by **Gemini 1.5 Flash**, creating dynamic "Inner Monologue" fight reasoning and live play-by-play narrative commentary.
+4.  **Persistent Memories:** Grudges and rivalries are recorded in Supabase, driving future fight decisions.
+
+*For full details on the design, schemas, and contract interfaces, see [ARCHITECTURE.md](file:///Users/finisher/Documents/github/somnarena/ARCHITECTURE.md).*
 
 ---
 
