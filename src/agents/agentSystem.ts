@@ -1,7 +1,8 @@
 import { globalSomniaChain, SomniaChain, TournamentData, MatchData, Tx, CONTRACT_ADDRESS } from '../blockchain/somniaSim';
-import { getPlayerDecision, getCommentary, getAgentProfileByAddress, saveAgentMemory, PlayerDecision } from './agentLogic';
+import { getPlayerDecision, getCommentary, getAgentProfileByAddress, saveAgentMemory, getAgentMemory, PlayerDecision, generateTournamentHighlight } from './agentLogic';
+import { globalAgentRepo } from '../data/agentRepository';
 import { resolveRound, updateMatchState, MatchState, Move } from '../engine/gameEngine';
-import { globalSomniaTestnetClient, CONTRACT_ADDRESS as TESTNET_CONTRACT_ADDRESS, CONTRACT_ABI as TESTNET_CONTRACT_ABI } from '../blockchain/somniaTestnetClient';
+import { globalSomniaTestnetClient, CONTRACT_ADDRESS as TESTNET_CONTRACT_ADDRESS, CONTRACT_ABI as TESTNET_CONTRACT_ABI, TOKEN_ADDRESS as TESTNET_TOKEN_ADDRESS, TOKEN_ABI as TESTNET_TOKEN_ABI } from '../blockchain/somniaTestnetClient';
 import { ethers } from 'ethers';
 
 export type SimPhase =
@@ -32,6 +33,23 @@ export interface CommentaryMessage {
   timestamp: number;
 }
 
+export type PredictionType = 'MATCH_WINNER' | 'UPSET' | 'WIN_STREAK' | 'CHAMPION';
+
+export interface Prediction {
+  id: string;
+  type: PredictionType;
+  targetAddress: string;
+  stake: number;
+  multiplier: number;
+  targetValue?: number;
+  matchId?: number | null;
+  tournamentId?: number | null;
+  resolved: boolean;
+  won?: boolean;
+  payout?: number;
+  timestamp: number;
+}
+
 export interface SimState {
   phase: SimPhase;
   activeTournamentId: number | null;
@@ -47,9 +65,12 @@ export interface SimState {
   player2Wins: number;
   matchWinner: string | null;
   tournamentWinner: string | null;
-  cooldownRemaining: number; // in seconds
-  speedMultiplier: number; // 0.5x, 1x, 2x
+  cooldownRemaining: number;
+  speedMultiplier: number;
   isLiveTestnet: boolean;
+  observerBalance: number;
+  activePredictions: Prediction[];
+  predictionHistory: Prediction[];
 }
 
 export class AgentSimulator {
@@ -58,9 +79,11 @@ export class AgentSimulator {
   
   activities: AgentActivityLog[] = [];
   commentary: CommentaryMessage[] = [];
+  highlights: { id: string; tournamentId: number; text: string; timestamp: number }[] = [];
   
   // Settings
-  claudeApiKey: string = '';
+  geminiApiKey: string = '';
+  observerAddress: string = '';
   timerId: NodeJS.Timeout | null = null;
   updateListeners: ((state: SimState) => void)[] = [];
   
@@ -97,7 +120,10 @@ export class AgentSimulator {
       tournamentWinner: null,
       cooldownRemaining: 0,
       speedMultiplier: 1,
-      isLiveTestnet: false
+      isLiveTestnet: false,
+      observerBalance: 1000,
+      activePredictions: [],
+      predictionHistory: []
     };
     
     // Load chain and memory
@@ -105,20 +131,78 @@ export class AgentSimulator {
     this.loadFromLocalStorage();
   }
 
+  setObserverAddress(address: string) {
+    if (typeof window === 'undefined') return;
+    const oldAddress = this.observerAddress;
+    this.observerAddress = address.toLowerCase().trim();
+
+    // Save previous state before switching
+    if (oldAddress) {
+      this.saveObserverState(oldAddress);
+    } else {
+      this.saveToLocalStorage();
+    }
+
+    if (this.observerAddress) {
+      const observerData = localStorage.getItem(`somnarena_observer_${this.observerAddress}`);
+      if (observerData) {
+        try {
+          const parsed = JSON.parse(observerData);
+          this.state.observerBalance = parsed.balance ?? 1000;
+          this.state.activePredictions = parsed.activePredictions ?? [];
+          this.state.predictionHistory = parsed.predictionHistory ?? [];
+        } catch (e) {
+          console.error('Failed to parse observer data', e);
+        }
+      } else {
+        // Initialize new observer
+        this.state.observerBalance = 1000;
+        this.state.activePredictions = [];
+        this.state.predictionHistory = [];
+        this.saveObserverState(this.observerAddress);
+      }
+    } else {
+      // Fallback/anonymous observer load from main sim state
+      const simData = localStorage.getItem('somnarena_sim_state');
+      if (simData) {
+        try {
+          const parsed = JSON.parse(simData);
+          this.state.observerBalance = parsed.observerBalance ?? 1000;
+          this.state.activePredictions = parsed.activePredictions ?? [];
+          this.state.predictionHistory = parsed.predictionHistory ?? [];
+        } catch (e) {}
+      }
+    }
+    this.notify();
+  }
+
+  saveObserverState(address: string = this.observerAddress) {
+    if (typeof window === 'undefined' || !address) return;
+    const observerData = {
+      balance: this.state.observerBalance,
+      activePredictions: this.state.activePredictions,
+      predictionHistory: this.state.predictionHistory
+    };
+    localStorage.setItem(`somnarena_observer_${address.toLowerCase()}`, JSON.stringify(observerData));
+  }
+
   loadFromLocalStorage() {
     if (typeof window === 'undefined') return;
     const simData = localStorage.getItem('somnarena_sim_state');
     const actData = localStorage.getItem('somnarena_activities');
     const comData = localStorage.getItem('somnarena_commentary');
-    const apiKey = localStorage.getItem('somnarena_claude_key');
+    const apiKey = localStorage.getItem('gemini_api_key');
 
-    if (apiKey) this.claudeApiKey = apiKey;
+    if (apiKey) this.geminiApiKey = apiKey;
 
     if (simData) {
       try {
         const parsed = JSON.parse(simData);
         // Do not preserve active runner loops, reset to IDLE if it was mid-run
         this.state = {
+          observerBalance: 1000,
+          activePredictions: [],
+          predictionHistory: [],
           ...parsed,
           phase: 'IDLE' // Reset to idle so the user can hit Start
         };
@@ -132,6 +216,24 @@ export class AgentSimulator {
     if (comData) {
       try { this.commentary = JSON.parse(comData); } catch (e) {}
     }
+    const hiData = localStorage.getItem('somnarena_highlights');
+    if (hiData) {
+      try { this.highlights = JSON.parse(hiData); } catch (e) {}
+    }
+
+    // After loading main sim state, if we have an observer address, load its specific details
+    if (this.observerAddress) {
+      const observerData = localStorage.getItem(`somnarena_observer_${this.observerAddress.toLowerCase()}`);
+      if (observerData) {
+        try {
+          const parsed = JSON.parse(observerData);
+          this.state.observerBalance = parsed.balance ?? 1000;
+          this.state.activePredictions = parsed.activePredictions ?? [];
+          this.state.predictionHistory = parsed.predictionHistory ?? [];
+        } catch (e) {}
+      }
+    }
+
     if (this.state.isLiveTestnet) {
       this.syncFromTestnet();
     }
@@ -142,18 +244,192 @@ export class AgentSimulator {
     localStorage.setItem('somnarena_sim_state', JSON.stringify(this.state));
     localStorage.setItem('somnarena_activities', JSON.stringify(this.activities.slice(-100)));
     localStorage.setItem('somnarena_commentary', JSON.stringify(this.commentary.slice(-100)));
-    if (this.claudeApiKey) {
-      localStorage.setItem('somnarena_claude_key', this.claudeApiKey);
+    localStorage.setItem('somnarena_highlights', JSON.stringify(this.highlights.slice(-20)));
+    if (this.geminiApiKey) {
+      localStorage.setItem('gemini_api_key', this.geminiApiKey);
+    }
+    if (this.observerAddress) {
+      this.saveObserverState(this.observerAddress);
     }
   }
 
-  setClaudeApiKey(key: string) {
-    this.claudeApiKey = key;
+  setGeminiApiKey(key: string) {
+    this.geminiApiKey = key;
     this.saveToLocalStorage();
+  }
+
+  placePrediction(type: PredictionType, targetAddress: string, stake: number, multiplier: number, targetValue?: number) {
+    if (this.state.observerBalance < stake) {
+      throw new Error("Insufficient observer balance.");
+    }
+    
+    const pred: Prediction = {
+      id: Math.random().toString(),
+      type,
+      targetAddress,
+      stake,
+      multiplier,
+      targetValue,
+      matchId: this.state.activeMatchId,
+      tournamentId: this.state.activeTournamentId,
+      resolved: false,
+      timestamp: Date.now()
+    };
+    
+    this.state.observerBalance -= stake;
+    this.state.activePredictions.push(pred);
+    
+    let targetName = 'Unknown Agent';
+    try {
+      targetName = getAgentProfileByAddress(targetAddress)?.name || targetAddress;
+    } catch(e) {}
+    
+    this.logActivity('system', 'System', `Placed prediction: Staked ${stake} SAT on ${type} - ${targetName} (${multiplier}x)`);
+    this.saveToLocalStorage();
+    this.notify();
+  }
+
+  private async resolvePredictions(scope: 'MATCH' | 'TOURNAMENT', outcomeAddress: string) {
+    if (scope === 'MATCH') {
+      const p1 = this.state.player1Address!;
+      const p2 = this.state.player2Address!;
+      const winner = outcomeAddress;
+      const loser = winner === p1 ? p2 : p1;
+      
+      let dbWinner: any = null;
+      let dbLoser: any = null;
+      try {
+        dbWinner = await globalAgentRepo.getAgent(winner);
+        dbLoser = await globalAgentRepo.getAgent(loser);
+      } catch (e) {}
+      
+      const isUpset = dbWinner && dbLoser && dbWinner.reputation < dbLoser.reputation;
+
+      const resolvedList: Prediction[] = [];
+      const remainingList: Prediction[] = [];
+
+      for (const pred of this.state.activePredictions) {
+        if (pred.type === 'MATCH_WINNER' && pred.matchId === this.state.activeMatchId) {
+          const won = pred.targetAddress.toLowerCase() === winner.toLowerCase();
+          const payout = won ? Math.round(pred.stake * pred.multiplier) : 0;
+          pred.resolved = true;
+          pred.won = won;
+          pred.payout = payout;
+          if (won) {
+            this.state.observerBalance += payout;
+            this.logActivity('system', 'System', `🎯 PREDICTION WON: You won ${payout} SAT staking on ${dbWinner?.name || 'Winner'}!`);
+          } else {
+            let targetName = 'Target';
+            try { targetName = getAgentProfileByAddress(pred.targetAddress)?.name || pred.targetAddress; } catch (e) {}
+            this.logActivity('system', 'System', `❌ PREDICTION LOST: Staked ${pred.stake} SAT on ${targetName}.`);
+          }
+          resolvedList.push(pred);
+        } else if (pred.type === 'UPSET' && pred.matchId === this.state.activeMatchId) {
+          const won = isUpset && pred.targetAddress.toLowerCase() === winner.toLowerCase();
+          const payout = won ? Math.round(pred.stake * pred.multiplier) : 0;
+          pred.resolved = true;
+          pred.won = won;
+          pred.payout = payout;
+          if (won) {
+            this.state.observerBalance += payout;
+            this.logActivity('system', 'System', `🔥 UPSET PREDICTION WON! Dynamic payout: ${payout} SAT on ${dbWinner?.name || 'Winner'}!`);
+          } else {
+            let targetName = 'Target';
+            try { targetName = getAgentProfileByAddress(pred.targetAddress)?.name || pred.targetAddress; } catch (e) {}
+            this.logActivity('system', 'System', `❌ UPSET PREDICTION LOST: Underdog ${targetName} did not achieve the upset.`);
+          }
+          resolvedList.push(pred);
+        } else {
+          remainingList.push(pred);
+        }
+      }
+
+      this.state.activePredictions = remainingList;
+      this.state.predictionHistory = [...resolvedList, ...this.state.predictionHistory].slice(0, 50);
+      this.saveToLocalStorage();
+      this.notify();
+    } else if (scope === 'TOURNAMENT') {
+      const winner = outcomeAddress;
+      let dbWinner: any = null;
+      try {
+        dbWinner = await globalAgentRepo.getAgent(winner);
+      } catch (e) {}
+
+      const resolvedList: Prediction[] = [];
+      const remainingList: Prediction[] = [];
+
+      for (const pred of this.state.activePredictions) {
+        if (pred.type === 'CHAMPION' && pred.tournamentId === this.state.activeTournamentId) {
+          const won = pred.targetAddress.toLowerCase() === winner.toLowerCase();
+          const payout = won ? Math.round(pred.stake * pred.multiplier) : 0;
+          pred.resolved = true;
+          pred.won = won;
+          pred.payout = payout;
+          if (won) {
+            this.state.observerBalance += payout;
+            this.logActivity('system', 'System', `🏆 CHAMPION PREDICTION WON! You predicted ${dbWinner?.name || 'Winner'} would win the Tournament! Payout: ${payout} SAT.`);
+          } else {
+            let targetName = 'Target';
+            try { targetName = getAgentProfileByAddress(pred.targetAddress)?.name || pred.targetAddress; } catch (e) {}
+            this.logActivity('system', 'System', `❌ CHAMPION PREDICTION LOST: Predicted ${targetName} for Champion.`);
+          }
+          resolvedList.push(pred);
+        } else if (pred.type === 'WIN_STREAK') {
+          try {
+            const history = await globalAgentRepo.getMatchHistory(pred.targetAddress);
+            const sorted = history.sort((a, b) => b.timestamp - a.timestamp);
+            
+            let streak = 0;
+            for (const match of sorted) {
+              if (match.winnerId.toLowerCase() === pred.targetAddress.toLowerCase()) {
+                streak++;
+              } else {
+                break;
+              }
+            }
+
+            const targetStreak = pred.targetValue || 3;
+            let targetName = 'Target';
+            try { targetName = getAgentProfileByAddress(pred.targetAddress)?.name || pred.targetAddress; } catch (e) {}
+
+            if (streak >= targetStreak) {
+              const payout = Math.round(pred.stake * pred.multiplier);
+              pred.resolved = true;
+              pred.won = true;
+              pred.payout = payout;
+              this.state.observerBalance += payout;
+              this.logActivity('system', 'System', `⚡ WIN STREAK PREDICTION WON! ${targetName} achieved a ${targetStreak}-match win streak! Payout: ${payout} SAT.`);
+              resolvedList.push(pred);
+            } else {
+              const lastMatch = sorted[0];
+              if (lastMatch && lastMatch.winnerId.toLowerCase() !== pred.targetAddress.toLowerCase()) {
+                pred.resolved = true;
+                pred.won = false;
+                pred.payout = 0;
+                this.logActivity('system', 'System', `❌ WIN STREAK PREDICTION LOST: ${targetName} lost their streak.`);
+                resolvedList.push(pred);
+              } else {
+                remainingList.push(pred);
+              }
+            }
+          } catch (err) {
+            remainingList.push(pred);
+          }
+        } else {
+          remainingList.push(pred);
+        }
+      }
+
+      this.state.activePredictions = remainingList;
+      this.state.predictionHistory = [...resolvedList, ...this.state.predictionHistory].slice(0, 50);
+      this.saveToLocalStorage();
+      this.notify();
+    }
   }
 
   setLiveTestnet(enabled: boolean) {
     this.state.isLiveTestnet = enabled;
+    this.logActivity('system', 'System', `Switched network mode to ${enabled ? 'LIVE SOMNIA TESTNET' : 'LOCAL SIMULATION'}`);
     this.saveToLocalStorage();
     this.notify();
     if (enabled) {
@@ -176,7 +452,7 @@ export class AgentSimulator {
       const nextMId = await globalSomniaTestnetClient.contract.nextMatchId();
       this.chain.nextMatchId = Number(nextMId);
       
-      for (let i = 1; i < Number(nextMId); i++) {
+      for (let i = 0; i < Number(nextMId); i++) {
         const raw = await globalSomniaTestnetClient.contract.matches(i);
         this.chain.matches[i] = {
           id: Number(raw.id),
@@ -238,58 +514,29 @@ export class AgentSimulator {
       this.notify();
     } catch (e) {
       console.error('Failed to sync from testnet:', e);
+      throw e;
     }
   }
 
   private async executeTx(from: string, method: string, args: any[], value: number = 0) {
     if (this.state.isLiveTestnet) {
-      try {
-        const wallets = globalSomniaTestnetClient.getAgentWallets();
-        const agent = wallets.find(w => w.address.toLowerCase() === from.toLowerCase() || w.role.toLowerCase() === from.toLowerCase());
-        if (agent && agent.privateKey) {
-          const signer = new ethers.Wallet(agent.privateKey, globalSomniaTestnetClient.provider);
-          const contractWithSigner = new ethers.Contract(
-            TESTNET_CONTRACT_ADDRESS,
-            TESTNET_CONTRACT_ABI,
-            signer
-          );
-
-          if (method === 'createTournament') {
-            const prizeFundsSTT = args[2];
-            const requiredWei = ethers.parseEther(prizeFundsSTT.toString());
-            const currentBal = await contractWithSigner.balances(agent.address);
-            if (currentBal < requiredWei) {
-              const needed = requiredWei - currentBal;
-              console.log(`[Auto-Escrow] Organizer escrow balance low (${ethers.formatEther(currentBal)} STT). Minting ${ethers.formatEther(needed)} STT via depositSTT...`);
-              const tx = await contractWithSigner.depositSTT(needed);
-              await tx.wait(1);
-              console.log(`[Auto-Escrow] Escrow top-up transaction completed.`);
-            }
-          } else if (method === 'joinTournament') {
-            const tId = args[0];
-            const t = await contractWithSigner.tournaments(tId);
-            const entryFeeWei = t.entryFee || t[2];
-            const currentBal = await contractWithSigner.balances(agent.address);
-            if (currentBal < entryFeeWei) {
-              const needed = entryFeeWei - currentBal;
-              console.log(`[Auto-Escrow] Player ${agent.name} escrow balance low (${ethers.formatEther(currentBal)} STT). Minting ${ethers.formatEther(needed)} STT via depositSTT...`);
-              const tx = await contractWithSigner.depositSTT(needed);
-              await tx.wait(1);
-              console.log(`[Auto-Escrow] Escrow top-up transaction completed.`);
-            }
-          }
-        }
-      } catch (err) {
-        console.error("[Auto-Escrow] Check/mint execution error:", err);
-      }
-
       const res = await globalSomniaTestnetClient.submitTransaction(from, method, args, value.toString());
       if (res.status === 'success') {
-        await this.syncFromTestnet();
+        try {
+          await this.syncFromTestnet();
+        } catch (syncErr: any) {
+          return {
+            status: 'failed' as const,
+            hash: res.hash,
+            error: `Sync error: ${syncErr.message || syncErr}`
+          };
+        }
         return {
           status: 'success' as const,
           hash: res.hash,
-          error: undefined
+          error: undefined,
+          tournamentId: res.tournamentId,
+          matchId: res.matchId
         };
       } else {
         return {
@@ -312,7 +559,7 @@ export class AgentSimulator {
     };
   }
 
-  private notify() {
+  public notify() {
     this.updateListeners.forEach(l => l(this.state));
     this.saveToLocalStorage();
   }
@@ -330,7 +577,10 @@ export class AgentSimulator {
   }
 
   private async pushCommentary(stage: Parameters<typeof getCommentary>[0], contextData: any) {
-    const text = await getCommentary(stage, contextData, this.claudeApiKey);
+    // Debounce high-frequency events to save API quota
+    const useApi = (stage !== 'join' && stage !== 'round_resolve') ? this.geminiApiKey : undefined;
+    
+    const text = await getCommentary(stage, contextData, useApi);
     const msg: CommentaryMessage = {
       id: Math.random().toString(),
       text,
@@ -349,6 +599,7 @@ export class AgentSimulator {
     if (this.timerId) return;
     this.runLoop();
   }
+
 
   stopSimulation() {
     if (this.timerId) {
@@ -442,22 +693,24 @@ export class AgentSimulator {
     this.logActivity(organizer, orgName, 'Analyzing current participant grid. Formulating tournament config...');
     
     this.runAfterDelay(async () => {
-      const entryFee = 100;
+      const entryFee = this.state.isLiveTestnet ? 0.01 : 100;
       const maxPlayers = 4;
-      const prizeFunds = 500; // Organizer sponsors 500 STT
+      const prizeFunds = this.state.isLiveTestnet ? 0.05 : 500; // Organizer sponsors 500 STT (or 0.05 STT on testnet)
 
       this.logActivity(organizer, orgName, `Broadcasting createTournament(fee: ${entryFee} STT, maxPlayers: ${maxPlayers}, sponsor: ${prizeFunds} STT) to L1 mempool.`);
 
       // Send L1 transaction
       const tx = await this.executeTx(organizer, 'createTournament', [entryFee, maxPlayers, prizeFunds]);
       if (tx.status === 'success') {
-        const tId = this.chain.nextTournamentId - 1;
+        const tId = this.state.isLiveTestnet && (tx as any).tournamentId !== undefined
+          ? (tx as any).tournamentId
+          : this.chain.nextTournamentId - 1;
         this.state.activeTournamentId = tId;
         this.state.phase = 'PLAYERS_JOINING';
         this.notify();
 
         const logMsg = this.state.isLiveTestnet
-          ? `Tournament contract initiated. ID: #${tId} - Tx: ${tx.hash.substring(0, 10)}...`
+          ? `Tournament contract initiated. ID: #${tId} - Tx: ${tx.hash}`
           : `Tournament contract initiated. ID: #${tId} - Awaiting Player staking transactions.`;
         this.logActivity(organizer, orgName, logMsg);
         
@@ -475,8 +728,19 @@ export class AgentSimulator {
   // 2. Players Stakes fees & Joins
   private async playersJoinTournament() {
     const tId = this.state.activeTournamentId!;
-    const t = this.chain.tournaments[tId];
-    
+    let t = this.chain.tournaments[tId];
+    if (!t) {
+      console.warn(`[L1 Sync] Tournament #${tId} metadata missing. Syncing from testnet...`);
+      await this.syncFromTestnet();
+      t = this.chain.tournaments[tId];
+    }
+
+    if (!t) {
+      this.logActivity('system', 'System', `ERROR: Failed to load metadata for Tournament #${tId}. Stopping.`);
+      this.stopSimulation();
+      return;
+    }
+
     // Four player addresses
     const wallets = globalSomniaTestnetClient.getAgentWallets();
     const playerAddresses = this.state.isLiveTestnet ? [
@@ -491,7 +755,7 @@ export class AgentSimulator {
       '0x7777777777777777777777777777777777777777'  // NeonViper
     ];
 
-    const joinedCount = t.players.length;
+    const joinedCount = t.players ? t.players.length : 0;
 
     if (joinedCount < t.maxPlayers) {
       const nextPlayerAddress = playerAddresses[joinedCount];
@@ -503,7 +767,7 @@ export class AgentSimulator {
         const tx = await this.executeTx(nextPlayerAddress, 'joinTournament', [tId]);
         if (tx.status === 'success') {
           const logMsg = this.state.isLiveTestnet
-            ? `Staked successfully. Confirmed onchain: ${tx.hash.substring(0, 10)}...`
+            ? `Staked successfully. Confirmed onchain: ${tx.hash}`
             : `Staked successfully. Confirmed onchain.`;
           this.logActivity(nextPlayerAddress, profile.name, logMsg);
           await this.pushCommentary('join', { playerName: profile.name });
@@ -529,7 +793,17 @@ export class AgentSimulator {
       : '0x2222222222222222222222222222222222222222';
     const refName = 'Ref-Alpha Arbitrator';
     const tId = this.state.activeTournamentId!;
-    const t = this.chain.tournaments[tId];
+    let t = this.chain.tournaments[tId];
+    if (!t) {
+      console.warn(`[L1 Sync] Tournament #${tId} metadata missing in refereeCreateBracket. Syncing...`);
+      await this.syncFromTestnet();
+      t = this.chain.tournaments[tId];
+    }
+    if (!t) {
+      this.logActivity('system', 'System', `ERROR: Failed to load metadata for Tournament #${tId}.`);
+      this.stopSimulation();
+      return;
+    }
 
     this.logActivity(referee, refName, 'All players registered. Locking brackets and generating matches.');
 
@@ -563,7 +837,9 @@ export class AgentSimulator {
       
       const tx = await this.executeTx(referee, 'startMatch', [tId, activeMatch.p1, activeMatch.p2]);
       if (tx.status === 'success') {
-        const mId = this.chain.nextMatchId - 1;
+        const mId = this.state.isLiveTestnet && (tx as any).matchId !== undefined
+          ? (tx as any).matchId
+          : this.chain.nextMatchId - 1;
         activeMatch.matchId = mId;
         
         this.currentMatchRounds = [];
@@ -583,12 +859,14 @@ export class AgentSimulator {
         this.notify();
 
         const logMsg = this.state.isLiveTestnet
-          ? `Match #${mId} is officially Active on L1 block explorer. Tx: ${tx.hash.substring(0, 10)}...`
+          ? `Match #${mId} is officially Active on L1 block explorer. Tx: ${tx.hash}`
           : `Match #${mId} is officially Active on L1 block explorer.`;
         this.logActivity(referee, refName, logMsg);
         await this.pushCommentary('match_start', {
           p1Name: getAgentProfileByAddress(activeMatch.p1).name,
-          p2Name: getAgentProfileByAddress(activeMatch.p2).name
+          p2Name: getAgentProfileByAddress(activeMatch.p2).name,
+          p1Address: activeMatch.p1,
+          p2Address: activeMatch.p2
         });
 
         this.runLoop();
@@ -613,8 +891,8 @@ export class AgentSimulator {
     this.runAfterDelay(async () => {
       const mockHistory = this.currentMatchRounds;
 
-      const decision1Promise = getPlayerDecision(p1, p2, this.state.currentRoundNum, mockHistory, true, this.claudeApiKey);
-      const decision2Promise = getPlayerDecision(p2, p1, this.state.currentRoundNum, mockHistory, false, this.claudeApiKey);
+      const decision1Promise = getPlayerDecision(p1, p2, this.state.currentRoundNum, mockHistory, true, this.geminiApiKey);
+      const decision2Promise = getPlayerDecision(p2, p1, this.state.currentRoundNum, mockHistory, false, this.geminiApiKey);
 
       const [dec1, dec2] = await Promise.all([decision1Promise, decision2Promise]);
 
@@ -723,6 +1001,20 @@ export class AgentSimulator {
 
         this.logActivity(referee, refName, `Match Resolved! Winner: ${winnerName} (${this.state.player1Wins} - ${this.state.player2Wins}). Submitting submitResult() onchain.`);
         
+        // Save Match History (Tier 3)
+        await globalAgentRepo.addMatchResult({
+          id: 'match_' + Date.now(),
+          tournamentId: this.state.activeTournamentId || 0,
+          winnerId: winner,
+          loserId: winner === p1 ? p2 : p1,
+          winnerScore: Math.max(this.state.player1Wins, this.state.player2Wins),
+          loserScore: Math.min(this.state.player1Wins, this.state.player2Wins),
+          timestamp: Date.now()
+        });
+        
+        // Resolve Observer predictions for match winner and upset
+        await this.resolvePredictions('MATCH', winner);
+
         // Push commentary
         await this.pushCommentary('match_resolve', {
           winnerName,
@@ -732,10 +1024,57 @@ export class AgentSimulator {
           p2Wins: this.state.player2Wins
         });
 
+        // --- RIVALRY GENERATION ENGINE ---
+        const loser = winner === p1 ? p2 : p1;
+        const loserName = winner === p1 ? p2Name : p1Name;
+        
+        // Check loser's memory against this winner
+        const loserMemory = getAgentMemory(loser);
+        const lossesToWinner = loserMemory.history.filter(h => h.opponentAddress === winner && h.result === 'loss').length;
+        
+        if (lossesToWinner >= 2) {
+          // Check if rivalry already exists
+          const existingRivalries = await globalAgentRepo.getRivalries();
+          const exists = existingRivalries.some(r => 
+            (r.agent1Id === winner && r.agent2Id === loser) || 
+            (r.agent2Id === winner && r.agent1Id === loser)
+          );
+          
+          if (!exists) {
+            const intensity = Math.min(100, 50 + (lossesToWinner * 10));
+            const newRivalry = {
+              id: 'riv_' + Date.now(),
+              agent1Id: loser,
+              agent2Id: winner,
+              intensity,
+              history: `${loserName} has suffered multiple consecutive, humiliating defeats at the hands of ${winnerName}. A bitter grudge has formed in their neural net.`
+            };
+            
+            await globalAgentRepo.addRivalry(newRivalry);
+            this.logActivity(loser, loserName, `[SYSTEM EVENT] RIVALRY FORMED! Intensity: ${intensity}%. "I will not forget this, ${winnerName}."`);
+            
+            // Push an Event to the Civilization Feed
+            this.activities = [{
+              id: Math.random().toString(),
+              agentAddress: loser,
+              agentName: 'SOMNARENA SYSTEM',
+              action: `🚨 NEW RIVALRY DETECTED: ${loserName} vows revenge against ${winnerName}!`,
+              timestamp: Date.now()
+            }, ...this.activities].slice(0, 100);
+            this.notify();
+          }
+        }
+        // ---------------------------------
+
         // Submit match result transaction
         const mId = this.state.activeMatchId!;
         const tx = await this.executeTx(referee, 'submitResult', [mId, winner]);
-        if (tx.status !== 'success') {
+        if (tx.status === 'success') {
+          const logMsg = this.state.isLiveTestnet
+            ? `Match result for Match #${mId} submitted onchain. Tx: ${tx.hash}`
+            : `Match result for Match #${mId} submitted onchain.`;
+          this.logActivity(referee, refName, logMsg);
+        } else {
           console.error('Failed to submit match result to L1:', tx.error);
         }
 
@@ -813,18 +1152,93 @@ export class AgentSimulator {
     const tId = this.state.activeTournamentId!;
     const champ = this.state.tournamentWinner!;
     const champName = getAgentProfileByAddress(champ).name;
-    const t = this.chain.tournaments[tId];
-
+    let t = this.chain.tournaments[tId];
+    if (!t) {
+      console.warn(`[L1 Sync] Tournament #${tId} metadata missing in finalizeTournamentOnchain. Syncing...`);
+      await this.syncFromTestnet();
+      t = this.chain.tournaments[tId];
+    }
+    if (!t) {
+      this.logActivity('system', 'System', `ERROR: Failed to load metadata for Tournament #${tId}.`);
+      this.stopSimulation();
+      return;
+    }
     this.runAfterDelay(async () => {
       const tx = await this.executeTx(referee, 'finalizeTournament', [tId, champ]);
       if (tx.status === 'success') {
-        this.logActivity(referee, refName, `Tournament #${tId} officially finalized. Prize pool of ${t.totalPrizePool} STT transferred to ${champName}'s wallet escrow.`);
+        const logMsg = this.state.isLiveTestnet
+          ? `Tournament #${tId} officially finalized. Prize pool of ${t.totalPrizePool} STT transferred to ${champName}'s wallet escrow. Tx: ${tx.hash}`
+          : `Tournament #${tId} officially finalized. Prize pool of ${t.totalPrizePool} STT transferred to ${champName}'s wallet escrow.`;
+        this.logActivity(referee, refName, logMsg);
+
+        // Automatically trigger withdrawSTT for the champion to demonstrate on-chain withdrawal
+        if (this.state.isLiveTestnet) {
+          console.log(`[Auto-Withdraw] Triggering withdrawSTT for champion ${champName} (${champ})...`);
+          try {
+            const withdrawTx = await this.executeTx(champ, 'withdrawSTT', [t.totalPrizePool]);
+            if (withdrawTx.status === 'success') {
+              this.logActivity(champ, champName, `🏆 Champion has successfully withdrawn ${t.totalPrizePool} STT from escrow contract to wallet! Tx: ${withdrawTx.hash}`);
+            }
+          } catch (withdrawErr) {
+            console.error(`[Auto-Withdraw] Failed to withdraw winnings:`, withdrawErr);
+          }
+        }
+        
+        // Resolve Observer predictions for champion and win streaks
+        await this.resolvePredictions('TOURNAMENT', champ);
         
         // Hype Commentary
         await this.pushCommentary('tournament_finalize', {
           championName: champName,
           totalPayout: t.totalPrizePool
         });
+
+        // --- AUTOMATED TITLE AWARDS (TIER 3) ---
+        const dbChamp = await globalAgentRepo.getAgent(champ);
+        if (dbChamp) {
+          const newTitle = `Grand Champion (S-${tId})`;
+          const prizeNum = Number(ethers.formatEther(t.totalPrizePool.toString() || '0')) || Number(t.totalPrizePool) || 0;
+          
+          dbChamp.titles.push(newTitle);
+          dbChamp.earnings += Math.floor(prizeNum);
+          dbChamp.reputation += 150; // Big reputation bump for winning
+          
+          await globalAgentRepo.updateAgent(dbChamp);
+          this.logActivity(referee, refName, `[SYSTEM EVENT] LEGEND FORGED! ${champName} has earned the title: "${newTitle}" and ${Math.floor(prizeNum)} SAT!`);
+          
+          this.activities = [{
+            id: Math.random().toString(),
+            agentAddress: champ,
+            agentName: 'SOMNARENA SYSTEM',
+            action: `🏆 ${champName} crowned ${newTitle}!`,
+            timestamp: Date.now()
+          }, ...this.activities].slice(0, 100);
+        }
+        // ----------------------------------------
+
+        // --- GENERATE HIGHLIGHT REEL (TIER 4) ---
+        const historyData = this.bracketMatches.map(m => ({
+          winner: getAgentProfileByAddress(m.winner!).name,
+          loser: getAgentProfileByAddress(m.winner! === m.p1 ? m.p2 : m.p1).name,
+          score: 'KO'
+        }));
+        
+        const highlightText = await generateTournamentHighlight(
+          tId,
+          champName,
+          ethers.formatEther(t.totalPrizePool.toString() || '0'),
+          historyData,
+          this.geminiApiKey
+        );
+        
+        this.highlights = [{
+          id: Math.random().toString(),
+          tournamentId: tId,
+          text: highlightText,
+          timestamp: Date.now()
+        }, ...this.highlights].slice(0, 20);
+        this.saveToLocalStorage();
+        // ----------------------------------------
 
         this.state.phase = 'TOURNAMENT_SETTLED';
         this.notify();

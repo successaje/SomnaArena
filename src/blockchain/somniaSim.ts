@@ -56,7 +56,7 @@ export interface MatchData {
 export interface Account {
   address: string;
   name: string;
-  role: 'organizer' | 'player' | 'referee' | 'commentator' | 'user';
+  role: string;
   balance: number; // STT
   color: string; // for UI representation
 }
@@ -66,10 +66,10 @@ export const AGENT_ACCOUNTS: Account[] = [
   { address: '0x1111111111111111111111111111111111111111', name: 'Synthetix Organizer', role: 'organizer', balance: 5000, color: '#00F0FF' },
   { address: '0x2222222222222222222222222222222222222222', name: 'Ref-Alpha Arbitrator', role: 'referee', balance: 500, color: '#39FF14' },
   { address: '0x3333333333333333333333333333333333333333', name: 'Neon Cast Commentator', role: 'commentator', balance: 500, color: '#FF007F' },
-  { address: '0x4444444444444444444444444444444444444444', name: 'ShadowByte', role: 'player', balance: 1000, color: '#A020F0' },
-  { address: '0x5555555555555555555555555555555555555555', name: 'QuantumCore', role: 'player', balance: 1000, color: '#FFB800' },
-  { address: '0x6666666666666666666666666666666666666666', name: 'CyberSlasher', role: 'player', balance: 1000, color: '#FF3333' },
-  { address: '0x7777777777777777777777777777777777777777', name: 'NeonViper', role: 'player', balance: 1000, color: '#00FF66' },
+  { address: '0x4444444444444444444444444444444444444444', name: 'ShadowByte', role: 'player_shadowbyte', balance: 1000, color: '#A020F0' },
+  { address: '0x5555555555555555555555555555555555555555', name: 'QuantumCore', role: 'player_quantumcore', balance: 1000, color: '#FFB800' },
+  { address: '0x6666666666666666666666666666666666666666', name: 'CyberSlasher', role: 'player_cyberslasher', balance: 1000, color: '#FF3333' },
+  { address: '0x7777777777777777777777777777777777777777', name: 'NeonViper', role: 'player_neonviper', balance: 1000, color: '#00FF66' },
 ];
 
 export const CONTRACT_ADDRESS = '0xSomnArenaTournamentContractXXXXXXXXXXXX';
@@ -203,10 +203,19 @@ export class SomniaChain {
     if (!sender) {
       status = 'failed';
       error = 'Sender address not registered';
-    } else if (sender.balance + (method === 'deposit' ? 0 : 0) < value) {
-      status = 'failed';
-      error = 'Insufficient gas or value balance';
     } else {
+      // Auto-faucet for local simulation so agents never run out of STT
+      if (sender.balance < 1000) {
+        sender.balance += 10000;
+      }
+      
+      if (sender.balance + (method === 'deposit' ? 0 : 0) < value) {
+        status = 'failed';
+        error = 'Insufficient gas or value balance';
+      }
+    }
+
+    if (status === 'success' && sender) {
       // Execute Solidity Logic
       try {
         if (method === 'createTournament') {

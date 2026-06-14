@@ -1,55 +1,51 @@
-# SomnArena — AI Tournament Civilization Progress Summary
+# SomnArena — Living AI Civilization Progress & Roadmap
 
-SomnArena is an autonomous multi-agent tournament system executing on a stateful, client-side simulation layer as well as a live connection to **Somnia's Agentic L1** blockchain. It models an onchain digital civilization where smart contracts coordinate organizers, referees, competitors, and commentary agents with zero human interaction.
-
----
-
-## 🛠️ What We Have Built So Far
-
-### 1. Smart Contract Layer (`contracts/SomnArenaTournament.sol`)
-We built a Solidity tournament contract that handles the core rules of the game:
-- **Escrow & Stakes**: Holds native STT tokens staked by organizers (for prize pools) and players (for entry fees).
-- **Matchmaking & Progress**: Tracks matches, registers players, and allows the referee to start matches.
-- **Onchain Resolution**: The Referee submits match outcomes, and the contract programmatically distributes the prize funds to the champion's escrow balance.
-- **View Helpers**: Exposes functions (`getTournamentPlayers`, `getTournamentMatches`) for client-side synchronization.
-
-### 2. Hardhat v3 & Deployment Infrastructure
-- **Hardhat Config (`hardhat.config.js`)**: Upgraded to Hardhat v3 ESM format using `defineConfig`. It specifies solidity compiler configurations, registers ethers, and hooks up the **Somnia Shannon Testnet** network settings (`chainId: 50312`, RPC endpoint, and Blockscout integration).
-- **Deployment Script (`scripts/deploy.js`)**: An ESM script that queries deployer balances, deploys the tournament contract, and waits for block confirmation.
-
-### 3. Dual-Mode Blockchain Clients
-- **Local Sandbox Simulator (`src/blockchain/somniaSim.ts`)**: Models local accounts, blocks, transactions, receipts, and EVM variables on a fast, simulated client-side loop.
-- **Live Testnet Client (`src/blockchain/somniaTestnetClient.ts`)**: Interfaces with the live Somnia Shannon Testnet using `ethers.js`. It generates and saves deterministic private keys for 7 autonomous agents in the browser's `localStorage`, syncs real native balances (STT gas) and contract escrow funds, and formats arguments for contract function calls.
-
-### 4. Multi-Agent Engine (`src/agents/`)
-We established an autonomous agent loop containing:
-- **Organizer Agent**: Automatically creates tournaments and sponsors prize pools.
-- **Player Agents (4 Profiles)**: *ShadowByte*, *QuantumCore*, *CyberSlasher*, and *NeonViper*. Each agent evaluates the game state and submits rock-paper-scissors choices. They run on **Claude LLM reasoning (specifically `claude-haiku-4-5-20251001`)** or fall back to rule-based heuristic modules.
-- **Referee Agent**: Coordinates matchmaking, verifies commitments, reveals moves, and submits onchain results.
-- **Commentary Agent (`Neon Cast`)**: Listens to block logs and outputs trash talk and play-by-play tournament analysis.
-
-### 5. Cyberpunk HUD Frontend (`src/app/`)
-- **Main App (`src/app/page.tsx`)**: An interactive dashboard showing:
-  - **Civilization Grid**: Agent balances (native and contract escrow), faucet triggers, and public keys.
-  - **Tournament Brackets**: Active tree showing Semifinals and Grand Finals progression.
-  - **Match Arena**: Visual head-to-head ring with move reveals and reasoning text shards.
-  - **Leaderboard**: Win/Loss/Tie stats and strategy descriptions.
-  - **L1 Explorer**: Transaction logs, block height tickers, gas prices, and transaction receipts.
-- **Styling (`src/app/globals.css`)**: Dark glassmorphic styling, glowing borders, custom scrollbars, and scanline overlay effects.
+SomnArena is an autonomous multi-agent tournament system executing on a stateful, client-side simulation layer as well as a live connection to the **Somnia Agentic L1** blockchain. It models an on-chain digital civilization where smart contracts coordinate organizers, referees, competitors, and commentary agents with zero human interaction.
 
 ---
 
-## 📈 The Development Process
+## 🛠️ What We Have Built So Far (Completed)
 
-1. **Simulated Sandbox First**: We began by building the complete agent system and game logic using a client-side blockchain simulator (`somniaSim.ts`). This allowed fast iterations on tournament stages, commentary feeds, and UI layouts without needing faucet funding or block delays.
-2. **Onchain Contract Formulation**: Next, we wrote the smart contract `SomnArenaTournament.sol` mirroring the simulator's logic, compiled it, and set up Hardhat for the Shannon Testnet.
-3. **Shannon Testnet Client Integration**: We created the `SomniaTestnetClient` to connect the autonomous browser loop directly to the live blockchain. This involved generating local storage wallets for the 7 agents, syncing their testnet parameters, and waiting on actual transaction confirmations (`tx.wait(1)`).
-4. **Build & ABI Verification**: We tested the compilation, resolved compiler discrepancies, and updated the client's ABI to support the view methods required to synchronize tournament structures.
+### 1. The ERC20 Custom SAT Economy (Tier 1)
+- **Smart Contract Refactor (`SomnArenaTournament.sol`)**: We completely overhauled the contract to strip out native STT token balances. The entire tournament ecosystem now natively operates on a custom ERC20 standard called **SomnArenaToken (SAT)**.
+- **Agent Auto-Approvals**: The `agentSystem.ts` loop was upgraded so agents dynamically approve the tournament contract to spend their SATs for staking and entry fees.
+
+### 2. Next.js App Router UI Migration (Tier 1)
+- **Deconstructed the Monolith**: We ripped out the massive 1,500-line `page.tsx` and refactored the frontend into a clean Next.js App Router structure.
+- **Global Context Architecture**: We built a persistent `SimulationProvider` and `useSimulation` hook so the civilization continues running in the background while users navigate.
+- **New Layout Shell**: Added a cinematic Cyberpunk Sidebar (`CivilizationShell.tsx`) allowing navigation between the Hub, Arena, and Legends.
+
+### 3. The Civilization Layer & Rivalry Engine (Tier 2)
+- **Data Repository**: Created `AgentRepository` and implemented `LocalAgentRepository` with foundational lore, origin stories, and personality protocols for ShadowByte, QuantumCore, CyberSlasher, and NeonViper.
+- **Dynamic Rivalry Engine**: Implemented logic in `checkMatchProgression`. If an agent loses twice to the same opponent, a Grudge is automatically forged, generating an `Intensity Score`.
+- **Civilization Feed**: Built `/dashboard` resembling a civilization Twitter feed, globally broadcasting tournament state, activities, and new rivalries.
+- **Agent Profiles**: Built dynamic pages at `/agent/[address]` displaying individual Reputation, Popularity, Aggression, Lore, and Active Rivalries.
+
+### 4. Gemini AI Story Engine Integration (Tier 2)
+- **Migrated from Claude to Gemini**: Swapped out the Claude LLM engine for the much faster and cheaper **Gemini 1.5 Flash**.
+- **Contextual Inner Monologue**: Agent decision prompts now dynamically load their Origin Story, Reputation, and Active Grudges against their current opponent.
+- **Hype Commentary**: The "Neon Cast" commentator checks the database for active rivalries between the current combatants and injects that history into its prompt to generate narrative-driven hype.
+- **API Proxy**: Established `/api/gemini/route.ts` and added an API Key input box to the UI sidebar.
 
 ---
 
-## 🎯 Current Status
+## 🚀 What Is Yet To Do (Upcoming Roadmap)
 
-- **Smart Contract**: Successfully deployed to the Shannon Testnet.
-- **Frontend/Backend Build**: Successfully verified (`npm run build` succeeds).
-- **Client Sync**: Fully wired to connect to the testnet contract address.
+### Tier 2: The Final Step
+- **[x] Supabase Migration**: Swapped the `LocalAgentRepository` for a `SupabaseAgentRepository`. This persists the generated rivalries, lore, and match histories globally in the cloud so all players see the same "Living Civilization."
+
+### Tier 3: Titles, Timeline, & The Hall of Legends
+- **[x] Automated Title Awards**: Updated `agentSystem.ts` so when an agent wins a tournament, it permanently appends a new title (e.g., "Grand Champion of S-12") to their Profile.
+- **[x] Historical Timeline**: Expanded the data layer to save Match Results into a global timeline, allowing the Hall of Legends `/legends` to generate visualizations of agent careers over time.
+
+### Tier 4: Refinement & Judge WOW Factor
+- **[x] Live Visual Polish**: Added micro-animations (glassmorphism reveals, attack visualizers) to the `/arena` view.
+- **[x] Match Highlight Generation**: Have the AI summarize entire completed tournaments into a "Highlight Reel" paragraph displayed on the Dashboard. 
+- **[x] README Overhaul**: Prepared the documentation for hackathon submission emphasizing the "Living Ecosystem" concept over just a game.
+
+### Tier 5 & 6: Extreme Hardening (Bonus)
+- **[x] API Optimization**: Aggressive Debouncing and JSON extraction to handle high-speed autonomous load without breaking the Gemini Free Tier Quota limits.
+- **[x] Model Auto-Fallback**: Server-side proxy instantly retries failed requests with alternative models to ensure uninterrupted civilization gameplay.
+
+---
+**🏆 ALL TIERS COMPLETE. READY FOR HACKATHON SUBMISSION.**

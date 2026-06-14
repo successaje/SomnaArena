@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
 /**
  * @title SomnArenaTournament
  * @notice Autonomous tournament system on Somnia L1.
- * Handles stakes, matching, disputes, and automatic prize distribution.
+ * Handles stakes, matching, disputes, and automatic prize distribution using custom ERC20 tokens.
  */
 contract SomnArenaTournament {
     enum TournamentState { Open, Active, Finalized }
@@ -33,12 +39,12 @@ contract SomnArenaTournament {
         bool rewardsDistributed;
     }
 
+    address public token; // The custom ERC20 token address
     uint256 public nextTournamentId;
     uint256 public nextMatchId;
 
     mapping(uint256 => Tournament) public tournaments;
     mapping(uint256 => Match) public matches;
-    mapping(address => uint256) public balances; // Escrow / user wallet balances in STT
 
     event TournamentCreated(
         uint256 indexed tournamentId,
@@ -51,25 +57,8 @@ contract SomnArenaTournament {
     event MatchStarted(uint256 indexed tournamentId, uint256 indexed matchId, address player1, address player2);
     event MatchResolved(uint256 indexed tournamentId, uint256 indexed matchId, address winner);
     event TournamentFinalized(uint256 indexed tournamentId, address indexed winner, uint256 totalPayout);
-    event Deposit(address indexed user, uint256 amount);
-    event Withdrawal(address indexed user, uint256 amount);
-
-    // Mock faucet for testing STT (Somnia Tournament Tokens)
-    function deposit() external payable {
-        balances[msg.sender] += msg.value;
-        emit Deposit(msg.sender, msg.value);
-    }
-
-    function depositSTT(uint256 amount) external {
-        balances[msg.sender] += amount;
-        emit Deposit(msg.sender, amount);
-    }
-
-    function withdrawSTT(uint256 amount) external {
-        require(balances[msg.sender] >= amount, "Insufficient balance");
-        balances[msg.sender] -= amount;
-        payable(msg.sender).transfer(amount);
-        emit Withdrawal(msg.sender, amount);
+    constructor(address _token) {
+        token = _token;
     }
 
     /**
@@ -82,8 +71,7 @@ contract SomnArenaTournament {
     ) external returns (uint256) {
         require(maxPlayers >= 2, "Need at least 2 players");
         if (prizeFunds > 0) {
-            require(balances[msg.sender] >= prizeFunds, "Insufficient organizer balance for sponsor funds");
-            balances[msg.sender] -= prizeFunds;
+            require(IERC20(token).transferFrom(msg.sender, address(this), prizeFunds), "Sponsor funds transfer failed");
         }
 
         uint256 tId = nextTournamentId++;
@@ -114,8 +102,7 @@ contract SomnArenaTournament {
         }
 
         if (t.entryFee > 0) {
-            require(balances[msg.sender] >= t.entryFee, "Insufficient balance to join");
-            balances[msg.sender] -= t.entryFee;
+            require(IERC20(token).transferFrom(msg.sender, address(this), t.entryFee), "Entry fee transfer failed");
             t.totalPrizePool += t.entryFee;
         }
 
@@ -191,7 +178,7 @@ contract SomnArenaTournament {
         t.rewardsDistributed = true;
 
         // Payout to winner
-        balances[winner] += t.totalPrizePool;
+        require(IERC20(token).transfer(winner, t.totalPrizePool), "Prize payout failed");
 
         emit TournamentFinalized(tournamentId, winner, t.totalPrizePool);
     }
