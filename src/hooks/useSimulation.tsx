@@ -16,6 +16,8 @@ interface SimulationContextProps {
   tournaments: Record<number, TournamentData>;
   matches: Record<number, MatchData>;
   gasPrice: number;
+  observerAddress: string;
+  setObserverAddress: (address: string) => void;
   toggleSimulation: () => void;
   resetChain: () => void;
   setGeminiApiKey: (key: string) => void;
@@ -31,6 +33,7 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
   const [commentary, setCommentary] = useState<CommentaryMessage[]>(globalAgentSimulator.commentary);
   const [highlights, setHighlights] = useState(globalAgentSimulator.highlights);
   const [isRunning, setIsRunning] = useState<boolean>(globalAgentSimulator.timerId !== null);
+  const [observerAddress, setObserverAddressState] = useState<string>(globalAgentSimulator.observerAddress);
   
   const [blocks, setBlocks] = useState<Block[]>(globalSomniaChain.blocks);
   const [events, setEvents] = useState<ChainEvent[]>(globalSomniaChain.events);
@@ -46,6 +49,7 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
       setCommentary([...globalAgentSimulator.commentary]);
       setHighlights([...globalAgentSimulator.highlights]);
       setIsRunning(globalAgentSimulator.timerId !== null);
+      setObserverAddressState(globalAgentSimulator.observerAddress);
     });
 
     const unsubscribeChain = globalSomniaChain.subscribe((_event) => {
@@ -66,6 +70,43 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
       clearInterval(interval);
     };
   }, []);
+
+  // Sync connected wallet balance to observerBalance
+  useEffect(() => {
+    if (observerAddress) {
+      const isSimulated = observerAddress.toLowerCase() === localStorage.getItem('somnarena_sandbox_wallet')?.toLowerCase();
+      if (typeof window !== 'undefined' && (window as any).ethereum && !isSimulated) {
+        import('ethers').then(({ ethers }) => {
+          const provider = new ethers.BrowserProvider((window as any).ethereum);
+          provider.getBalance(observerAddress)
+            .then(bal => {
+              const formatted = parseFloat(ethers.formatEther(bal));
+              globalAgentSimulator.state.observerBalance = parseFloat(formatted.toFixed(4));
+              globalAgentSimulator.notify();
+            })
+            .catch(() => {});
+        });
+      } else {
+        // Simulated sandbox wallet has 10.0 STT
+        globalAgentSimulator.state.observerBalance = 10.0;
+        globalAgentSimulator.notify();
+      }
+    } else {
+      // If no wallet connected, reset to default 1000 SAT (or whatever was stored)
+      const saved = localStorage.getItem('somnarena_observer_0x0000000000000000000000000000000000000000');
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          globalAgentSimulator.state.observerBalance = parsed.balance || 1000;
+        } catch {
+          globalAgentSimulator.state.observerBalance = 1000;
+        }
+      } else {
+        globalAgentSimulator.state.observerBalance = 1000;
+      }
+      globalAgentSimulator.notify();
+    }
+  }, [observerAddress, blocks]);
 
   const toggleSimulation = () => {
     if (isRunning) {
@@ -123,6 +164,11 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
     globalAgentSimulator.setLiveTestnet(!simState.isLiveTestnet);
   };
 
+  const setObserverAddress = (address: string) => {
+    globalAgentSimulator.setObserverAddress(address);
+    setObserverAddressState(globalAgentSimulator.observerAddress);
+  };
+
   const placePrediction = (type: PredictionType, targetAddress: string, stake: number, multiplier: number, targetValue?: number) => {
     globalAgentSimulator.placePrediction(type, targetAddress, stake, multiplier, targetValue);
   };
@@ -141,6 +187,8 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
         tournaments,
         matches,
         gasPrice,
+        observerAddress,
+        setObserverAddress,
         toggleSimulation,
         resetChain,
         setGeminiApiKey: (key: string) => globalAgentSimulator.setGeminiApiKey(key),

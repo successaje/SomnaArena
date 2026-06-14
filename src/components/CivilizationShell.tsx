@@ -7,12 +7,133 @@ import { useSimulation } from '../hooks/useSimulation';
 
 export function CivilizationShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { simState, blocks, gasPrice, isRunning, toggleSimulation, resetChain, setGeminiApiKey, toggleLiveTestnet } = useSimulation();
+  const { simState, blocks, gasPrice, isRunning, toggleSimulation, resetChain, setGeminiApiKey, toggleLiveTestnet, observerAddress, setObserverAddress } = useSimulation();
   const [mounted, setMounted] = useState(false);
 
+  const [walletBal, setWalletBal] = useState<string>('0.00');
+  const [isSimulated, setIsSimulated] = useState<boolean>(false);
+  const [claiming, setClaiming] = useState<boolean>(false);
+  const [claimStatus, setClaimStatus] = useState<string>('');
+
+  // Auto-connect to metamask if already authorized
   useEffect(() => {
     setMounted(true);
-  }, []);
+    if (typeof window !== 'undefined' && (window as any).ethereum) {
+      (window as any).ethereum.request({ method: 'eth_accounts' })
+        .then((accounts: string[]) => {
+          if (accounts && accounts[0]) {
+            setObserverAddress(accounts[0]);
+            setIsSimulated(false);
+          } else {
+            // Check for simulated sandbox wallet in localStorage
+            const savedSim = localStorage.getItem('somnarena_sandbox_wallet');
+            if (savedSim) {
+              setObserverAddress(savedSim);
+              setIsSimulated(true);
+            }
+          }
+        });
+
+      const handleAccounts = (accounts: string[]) => {
+        if (accounts && accounts[0]) {
+          setObserverAddress(accounts[0]);
+          setIsSimulated(false);
+        } else {
+          setObserverAddress('');
+        }
+      };
+
+      (window as any).ethereum.on('accountsChanged', handleAccounts);
+      return () => {
+        (window as any).ethereum?.removeListener('accountsChanged', handleAccounts);
+      };
+    } else {
+      const savedSim = localStorage.getItem('somnarena_sandbox_wallet');
+      if (savedSim) {
+        setObserverAddress(savedSim);
+        setIsSimulated(true);
+      }
+    }
+  }, [setObserverAddress]);
+
+  // Fetch balance dynamically
+  useEffect(() => {
+    if (observerAddress) {
+      if (typeof window !== 'undefined' && (window as any).ethereum && !isSimulated) {
+        import('ethers').then(({ ethers }) => {
+          const provider = new ethers.BrowserProvider((window as any).ethereum);
+          provider.getBalance(observerAddress)
+            .then(bal => {
+              setWalletBal(parseFloat(ethers.formatEther(bal)).toFixed(4));
+            })
+            .catch(() => setWalletBal('0.00'));
+        });
+      } else {
+        setWalletBal('10.0000');
+      }
+    } else {
+      setWalletBal('0.00');
+    }
+  }, [observerAddress, isSimulated, blocks]);
+
+  const connectWallet = async () => {
+    if (typeof window !== 'undefined' && (window as any).ethereum) {
+      try {
+        const accounts = await (window as any).ethereum.request({ method: 'eth_requestAccounts' });
+        if (accounts && accounts[0]) {
+          setObserverAddress(accounts[0]);
+          setIsSimulated(false);
+        }
+      } catch (err) {
+        console.error('Wallet connection rejected', err);
+      }
+    } else {
+      // Sandbox Web3 wallet creation fallback
+      import('ethers').then(({ ethers }) => {
+        const randomWallet = ethers.Wallet.createRandom();
+        localStorage.setItem('somnarena_sandbox_wallet', randomWallet.address);
+        setObserverAddress(randomWallet.address);
+        setIsSimulated(true);
+      });
+    }
+  };
+
+  const disconnectWallet = () => {
+    setObserverAddress('');
+    if (isSimulated) {
+      localStorage.removeItem('somnarena_sandbox_wallet');
+    }
+  };
+
+  const claimFaucet = async () => {
+    if (!observerAddress) return;
+    setClaiming(true);
+    setClaimStatus('Requesting 0.1 STT from gas faucet...');
+    try {
+      const res = await fetch('/api/faucet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: observerAddress })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setClaimStatus(`Funded! TX Hash: ${data.hash.slice(0, 10)}...`);
+        if (typeof window !== 'undefined' && (window as any).ethereum && !isSimulated) {
+          import('ethers').then(({ ethers }) => {
+            const provider = new ethers.BrowserProvider((window as any).ethereum);
+            provider.getBalance(observerAddress)
+              .then(bal => setWalletBal(parseFloat(ethers.formatEther(bal)).toFixed(4)));
+          });
+        }
+      } else {
+        setClaimStatus(`Faucet: ${data.error || 'Failed'}`);
+      }
+    } catch (err: any) {
+      setClaimStatus(`Error: ${err.message}`);
+    }
+    setClaiming(false);
+    setTimeout(() => setClaimStatus(''), 6000);
+  };
 
   if (!mounted) return null;
 
@@ -65,6 +186,99 @@ export function CivilizationShell({ children }: { children: React.ReactNode }) {
           <NavItem href="/dashboard" current={pathname} icon="🌐" label="Civilization Hub" />
           <NavItem href="/arena" current={pathname} icon="⚔️" label="Live Arena" />
           <NavItem href="/legends" current={pathname} icon="🏆" label="Hall of Legends" />
+          
+          {/* Web3 Wallet Section */}
+          <div style={{
+            padding: '15px 20px',
+            borderTop: '1px solid var(--border-color)',
+            borderBottom: '1px solid var(--border-color)',
+            background: 'rgba(255, 255, 255, 0.02)',
+            marginTop: '15px',
+            marginBottom: '15px',
+            fontSize: '0.85rem'
+          }}>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', letterSpacing: '1px', marginBottom: '8px' }}>
+              OBSERVER WALLET
+            </div>
+            {!observerAddress ? (
+              <button
+                onClick={connectWallet}
+                className="pulse-glow"
+                style={{
+                  width: '100%',
+                  background: 'var(--neon-cyan)',
+                  color: '#000',
+                  border: 'none',
+                  padding: '10px',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontFamily: 'monospace',
+                  fontWeight: 'bold',
+                  fontSize: '0.8rem'
+                }}
+              >
+                ⚡ CONNECT WALLET
+              </button>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'monospace' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>ADDR:</span>
+                  <span style={{ color: 'var(--neon-green)' }}>
+                    {observerAddress.slice(0, 6)}...{observerAddress.slice(-4)}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'monospace' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>BAL:</span>
+                  <span>{walletBal} STT</span>
+                </div>
+                {isSimulated && (
+                  <div style={{ fontSize: '0.65rem', color: 'var(--neon-amber)', fontStyle: 'italic' }}>
+                    Sandbox Burner (No MetaMask)
+                  </div>
+                )}
+                
+                <div style={{ display: 'flex', gap: '8px', marginTop: '5px' }}>
+                  <button
+                    onClick={claimFaucet}
+                    disabled={claiming}
+                    style={{
+                      flex: 1,
+                      background: 'rgba(0, 240, 255, 0.1)',
+                      color: 'var(--neon-cyan)',
+                      border: '1px solid var(--neon-cyan)',
+                      padding: '5px',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '0.75rem',
+                      fontFamily: 'monospace'
+                    }}
+                  >
+                    {claiming ? 'CLAIMING...' : '🎁 FAUCET'}
+                  </button>
+                  <button
+                    onClick={disconnectWallet}
+                    style={{
+                      background: 'rgba(255, 0, 128, 0.1)',
+                      color: 'var(--neon-magenta)',
+                      border: '1px solid var(--neon-magenta)',
+                      padding: '5px 8px',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '0.75rem',
+                      fontFamily: 'monospace'
+                    }}
+                  >
+                    EXIT
+                  </button>
+                </div>
+                {claimStatus && (
+                  <div style={{ fontSize: '0.7rem', color: 'var(--neon-amber)', fontFamily: 'monospace', wordBreak: 'break-all', marginTop: '5px' }}>
+                    {claimStatus}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
           
           <div style={{ flex: 1 }} />
           

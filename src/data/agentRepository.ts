@@ -1,3 +1,5 @@
+import { globalSomniaTestnetClient } from '../blockchain/somniaTestnetClient';
+
 export interface Agent {
   id: string; // Typically the Ethereum address
   name: string;
@@ -13,6 +15,39 @@ export interface Agent {
     personality: string;
     strategy: string;
   };
+}
+
+export function getCanonicalAgentId(address: string): string {
+  if (!address) return address;
+  const lowercase = address.toLowerCase();
+  
+  const staticAddresses = [
+    '0x4444444444444444444444444444444444444444',
+    '0x5555555555555555555555555555555555555555',
+    '0x6666666666666666666666666666666666666666',
+    '0x7777777777777777777777777777777777777777'
+  ];
+  if (staticAddresses.includes(lowercase)) {
+    return lowercase;
+  }
+
+  try {
+    const wallets = globalSomniaTestnetClient.getAgentWallets();
+    const match = wallets.find(w => w.address.toLowerCase() === lowercase);
+    if (match) {
+      const roleToStaticAddr: Record<string, string> = {
+        'player_shadowbyte': '0x4444444444444444444444444444444444444444',
+        'player_quantumcore': '0x5555555555555555555555555555555555555555',
+        'player_cyberslasher': '0x6666666666666666666666666666666666666666',
+        'player_neonviper': '0x7777777777777777777777777777777777777777'
+      };
+      return roleToStaticAddr[match.role] || lowercase;
+    }
+  } catch (err) {
+    // Ignore error if not initialized
+  }
+
+  return lowercase;
 }
 
 export interface Rivalry {
@@ -179,7 +214,8 @@ export class LocalAgentRepository implements AgentRepository {
   }
 
   async getAgent(id: string): Promise<Agent | null> {
-    return this.agents.get(id.toLowerCase()) || null;
+    const canonicalId = getCanonicalAgentId(id);
+    return this.agents.get(canonicalId.toLowerCase()) || null;
   }
 
   async getAllAgents(): Promise<Agent[]> {
@@ -187,27 +223,44 @@ export class LocalAgentRepository implements AgentRepository {
   }
 
   async updateAgent(agent: Agent): Promise<void> {
-    this.agents.set(agent.id.toLowerCase(), agent);
+    const canonicalId = getCanonicalAgentId(agent.id);
+    agent.id = canonicalId;
+    this.agents.set(canonicalId.toLowerCase(), agent);
     this.saveToStorage();
   }
 
   async getRivalries(): Promise<Rivalry[]> {
-    return this.rivalries;
+    // Map rivalries IDs to canonical just in case
+    return this.rivalries.map(r => ({
+      ...r,
+      agent1Id: getCanonicalAgentId(r.agent1Id),
+      agent2Id: getCanonicalAgentId(r.agent2Id)
+    }));
   }
 
   async addRivalry(rivalry: Rivalry): Promise<void> {
+    rivalry.agent1Id = getCanonicalAgentId(rivalry.agent1Id);
+    rivalry.agent2Id = getCanonicalAgentId(rivalry.agent2Id);
     this.rivalries.push(rivalry);
     this.saveToStorage();
   }
 
   async getMatchHistory(agentId?: string): Promise<HistoricalMatch[]> {
-    if (!agentId) return this.matches.sort((a, b) => b.timestamp - a.timestamp);
-    return this.matches
-      .filter(m => m.winnerId.toLowerCase() === agentId.toLowerCase() || m.loserId.toLowerCase() === agentId.toLowerCase())
+    const canonicalId = agentId ? getCanonicalAgentId(agentId).toLowerCase() : undefined;
+    const mapped = this.matches.map(m => ({
+      ...m,
+      winnerId: getCanonicalAgentId(m.winnerId),
+      loserId: getCanonicalAgentId(m.loserId)
+    }));
+    if (!canonicalId) return mapped.sort((a, b) => b.timestamp - a.timestamp);
+    return mapped
+      .filter(m => m.winnerId.toLowerCase() === canonicalId || m.loserId.toLowerCase() === canonicalId)
       .sort((a, b) => b.timestamp - a.timestamp);
   }
 
   async addMatchResult(match: HistoricalMatch): Promise<void> {
+    match.winnerId = getCanonicalAgentId(match.winnerId);
+    match.loserId = getCanonicalAgentId(match.loserId);
     this.matches.push(match);
     this.saveToStorage();
   }

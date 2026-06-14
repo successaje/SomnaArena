@@ -58,14 +58,51 @@ export default function DashboardPage() {
             </div>
           ))}
 
-          {activities.slice(0, 5).map((act, idx) => (
-            <div key={'act'+idx} style={{ padding: '15px', background: 'rgba(0, 240, 255, 0.05)', borderLeft: '2px solid var(--neon-cyan)' }}>
-              <div style={{ fontSize: '0.7rem', color: 'var(--neon-cyan)', marginBottom: '5px', letterSpacing: '1px' }}>
-                [EVENT] — {act.agentName}
+          {activities.slice(0, 15).map((act, idx) => {
+            const renderActionWithLinks = (actionText: string) => {
+              const txRegex = /0x[a-fA-F0-9]{64}/g;
+              const match = actionText.match(txRegex);
+              if (match) {
+                const parts = actionText.split(txRegex);
+                return (
+                  <>
+                    {parts.map((part, i) => (
+                      <React.Fragment key={i}>
+                        {part}
+                        {match[i] && (
+                          <a
+                            href={`https://shannon-explorer.somnia.network/tx/${match[i]}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: 'var(--neon-cyan)', textDecoration: 'underline', fontWeight: 'bold' }}
+                          >
+                            {match[i].substring(0, 8)}...{match[i].substring(60)}
+                          </a>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </>
+                );
+              }
+              return actionText;
+            };
+
+            return (
+              <div key={'act'+idx} style={{ padding: '15px', background: 'rgba(0, 240, 255, 0.05)', borderLeft: '2px solid var(--neon-cyan)', borderRadius: '4px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--neon-cyan)', letterSpacing: '1px' }}>
+                    [EVENT] — {act.agentName}
+                  </span>
+                  <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                    {new Date(act.timestamp).toLocaleTimeString()}
+                  </span>
+                </div>
+                <div style={{ fontSize: '0.85rem', fontFamily: 'monospace', lineHeight: '1.4' }}>
+                  {renderActionWithLinks(act.action)}
+                </div>
               </div>
-              <div style={{ fontSize: '0.85rem', fontFamily: 'monospace' }}>{act.action}</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 

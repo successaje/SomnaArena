@@ -1,6 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { Agent, AgentRepository, HistoricalMatch, Rivalry } from './agentRepository';
-// Use dynamic require to avoid circular dependencies if any, or just import
+import { Agent, AgentRepository, HistoricalMatch, Rivalry, getCanonicalAgentId } from './agentRepository';
 import { INITIAL_AGENTS } from './agentRepository';
 
 export class SupabaseAgentRepository implements AgentRepository {
@@ -13,7 +12,7 @@ export class SupabaseAgentRepository implements AgentRepository {
 
   private mapAgentFromDB(row: any): Agent {
     return {
-      id: row.id,
+      id: getCanonicalAgentId(row.id),
       name: row.name,
       avatar: row.avatar,
       reputation: row.reputation,
@@ -31,8 +30,9 @@ export class SupabaseAgentRepository implements AgentRepository {
   }
 
   private mapAgentToDB(agent: Agent): any {
+    const canonicalId = getCanonicalAgentId(agent.id);
     return {
-      id: agent.id,
+      id: canonicalId,
       name: agent.name,
       avatar: agent.avatar,
       reputation: agent.reputation,
@@ -57,10 +57,11 @@ export class SupabaseAgentRepository implements AgentRepository {
   }
 
   async getAgent(id: string): Promise<Agent | null> {
+    const canonicalId = getCanonicalAgentId(id);
     const { data, error } = await this.supabase
       .from('agents')
       .select('*')
-      .eq('id', id)
+      .eq('id', canonicalId)
       .maybeSingle();
 
     if (error) {
@@ -69,9 +70,8 @@ export class SupabaseAgentRepository implements AgentRepository {
     }
 
     if (!data) {
-      // If table is totally empty, auto-seed and try to return from memory
       await this.seedDatabaseIfEmpty();
-      return INITIAL_AGENTS[id.toLowerCase()] || INITIAL_AGENTS[id] || null;
+      return INITIAL_AGENTS[canonicalId.toLowerCase()] || INITIAL_AGENTS[canonicalId] || null;
     }
 
     return this.mapAgentFromDB(data);
@@ -88,8 +88,16 @@ export class SupabaseAgentRepository implements AgentRepository {
       return [];
     }
 
-    if (!data || data.length === 0) {
+    if (!data || data.length < Object.keys(INITIAL_AGENTS).length) {
       await this.seedDatabaseIfEmpty();
+      // Refetch after seeding
+      const { data: refetched } = await this.supabase
+        .from('agents')
+        .select('*')
+        .order('reputation', { ascending: false });
+      if (refetched && refetched.length > 0) {
+        return refetched.map(this.mapAgentFromDB);
+      }
       return Object.values(INITIAL_AGENTS).sort((a, b) => b.reputation - a.reputation);
     }
     
@@ -119,8 +127,8 @@ export class SupabaseAgentRepository implements AgentRepository {
     }
     return data.map((r: any) => ({
       id: r.id,
-      agent1Id: r.agent1_id,
-      agent2Id: r.agent2_id,
+      agent1Id: getCanonicalAgentId(r.agent1_id),
+      agent2Id: getCanonicalAgentId(r.agent2_id),
       intensity: r.intensity,
       history: r.history
     }));
@@ -131,8 +139,8 @@ export class SupabaseAgentRepository implements AgentRepository {
       .from('rivalries')
       .upsert({
         id: rivalry.id,
-        agent1_id: rivalry.agent1Id,
-        agent2_id: rivalry.agent2Id,
+        agent1_id: getCanonicalAgentId(rivalry.agent1Id),
+        agent2_id: getCanonicalAgentId(rivalry.agent2Id),
         intensity: rivalry.intensity,
         history: rivalry.history
       });
@@ -149,8 +157,9 @@ export class SupabaseAgentRepository implements AgentRepository {
       .order('timestamp', { ascending: false })
       .limit(100);
 
-    if (agentId) {
-      query = query.or(`winner_id.eq.${agentId},loser_id.eq.${agentId}`);
+    const canonicalId = agentId ? getCanonicalAgentId(agentId) : undefined;
+    if (canonicalId) {
+      query = query.or(`winner_id.eq.${canonicalId},loser_id.eq.${canonicalId}`);
     }
 
     const { data, error } = await query;
@@ -173,8 +182,8 @@ export class SupabaseAgentRepository implements AgentRepository {
       return {
         id: m.id,
         tournamentId: m.tournament_id,
-        winnerId: m.winner_id,
-        loserId: m.loser_id,
+        winnerId: getCanonicalAgentId(m.winner_id),
+        loserId: getCanonicalAgentId(m.loser_id),
         winnerScore,
         loserScore,
         timestamp: m.timestamp
@@ -188,8 +197,8 @@ export class SupabaseAgentRepository implements AgentRepository {
       .upsert({
         id: match.id,
         tournament_id: match.tournamentId,
-        winner_id: match.winnerId,
-        loser_id: match.loserId,
+        winner_id: getCanonicalAgentId(match.winnerId),
+        loser_id: getCanonicalAgentId(match.loserId),
         score: `${match.winnerScore}-${match.loserScore}`,
         timestamp: match.timestamp
       });
@@ -199,3 +208,4 @@ export class SupabaseAgentRepository implements AgentRepository {
     }
   }
 }
+

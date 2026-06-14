@@ -21,10 +21,19 @@ export default function LegendsPage() {
   const byAggression = [...agents].sort((a, b) => b.aggression - a.aggression);
   const byPopularity = [...agents].sort((a, b) => b.popularity - a.popularity);
 
-  const highestEarner = byEarnings[0];
+  // De-duplicate featured agents to avoid showing the same agent in multiple cards
+  const selectedIds = new Set<string>();
+
   const mostReputable = byReputation[0];
-  const mostAggressive = byAggression[0];
-  const mostPopular = byPopularity[0];
+  selectedIds.add(mostReputable.id.toLowerCase());
+
+  const highestEarner = byEarnings.find(a => !selectedIds.has(a.id.toLowerCase())) || byEarnings[0];
+  selectedIds.add(highestEarner.id.toLowerCase());
+
+  const mostPopular = byPopularity.find(a => !selectedIds.has(a.id.toLowerCase())) || byPopularity[0];
+  selectedIds.add(mostPopular.id.toLowerCase());
+
+  const mostAggressive = byAggression.find(a => !selectedIds.has(a.id.toLowerCase())) || byAggression[0];
 
   return (
     <div style={{ padding: '20px', height: '100%', overflowY: 'auto' }}>

@@ -6,11 +6,21 @@ import { globalAgentRepo, Agent } from '../data/agentRepository';
 import { PredictionType } from '../agents/agentSystem';
 
 export default function PredictionWidget() {
-  const { simState, placePrediction } = useSimulation();
+  const { simState, placePrediction, observerAddress } = useSimulation();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [betType, setBetType] = useState<PredictionType>('MATCH_WINNER');
   const [targetAgent, setTargetAgent] = useState<string>('');
+  
+  const isConnected = !!observerAddress;
+  const currency = isConnected ? 'STT' : 'SAT';
+
   const [stake, setStake] = useState<number>(100);
+
+  // Sync default stake based on connection status
+  useEffect(() => {
+    setStake(isConnected ? 0.05 : 100);
+  }, [isConnected]);
+
   const [targetValue, setTargetValue] = useState<number>(3); // For win streak
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
@@ -76,7 +86,7 @@ export default function PredictionWidget() {
     }
 
     if (simState.observerBalance < stake) {
-      setErrorMsg('Insufficient SAT balance.');
+      setErrorMsg(`Insufficient ${currency} balance.`);
       return;
     }
 
@@ -107,7 +117,7 @@ export default function PredictionWidget() {
 
     try {
       placePrediction(betType, targetAgent, stake, odds, betType === 'WIN_STREAK' ? targetValue : undefined);
-      setSuccessMsg(`Prediction placed successfully! Staked ${stake} SAT.`);
+      setSuccessMsg(`Prediction placed successfully! Staked ${stake} ${currency}.`);
       setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to place prediction.');
@@ -125,7 +135,7 @@ export default function PredictionWidget() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(0,0,0,0.3)', padding: '10px', borderRadius: '4px', border: '1px solid rgba(0, 255, 128, 0.2)' }}>
         <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>YOUR BALANCE:</span>
         <span style={{ fontSize: '1rem', fontWeight: 'bold', color: 'var(--neon-green)' }}>
-          {simState.observerBalance} SAT
+          {simState.observerBalance} {currency}
         </span>
       </div>
 
@@ -178,13 +188,13 @@ export default function PredictionWidget() {
 
         {/* Stake */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-          <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>STAKE (SAT)</label>
+          <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>STAKE ({currency})</label>
           <input
             type="number"
-            min="10"
-            step="10"
+            min={isConnected ? "0.01" : "10"}
+            step={isConnected ? "0.01" : "10"}
             value={stake}
-            onChange={(e) => setStake(parseInt(e.target.value) || 0)}
+            onChange={(e) => setStake(parseFloat(e.target.value) || 0)}
             style={{ background: '#090a10', color: '#fff', border: '1px solid var(--border-color)', padding: '8px', fontSize: '0.8rem', borderRadius: '4px' }}
           />
         </div>
@@ -196,7 +206,9 @@ export default function PredictionWidget() {
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.03)', padding: '8px', borderRadius: '4px', marginTop: '-8px' }}>
           <span>Est. Payout:</span>
-          <span style={{ color: 'var(--neon-green)', fontWeight: 'bold' }}>{Math.round(stake * activeOdds)} SAT</span>
+          <span style={{ color: 'var(--neon-green)', fontWeight: 'bold' }}>
+            {isConnected ? (stake * activeOdds).toFixed(4) : Math.round(stake * activeOdds)} {currency}
+          </span>
         </div>
 
         {errorMsg && <div style={{ color: '#ff4d4d', fontSize: '0.75rem', fontWeight: 'bold' }}>{errorMsg}</div>}
@@ -236,7 +248,7 @@ export default function PredictionWidget() {
                 <div key={p.id} style={{ padding: '8px', background: 'rgba(255, 255, 255, 0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '4px', fontSize: '0.75rem' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
                     <span style={{ color: 'var(--neon-cyan)' }}>{p.type}</span>
-                    <span style={{ color: '#fff' }}>{p.stake} SAT ({p.multiplier}x)</span>
+                    <span style={{ color: '#fff' }}>{p.stake} {currency} ({p.multiplier}x)</span>
                   </div>
                   <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', marginTop: '2px' }}>
                     Target: {agent ? agent.name : 'Unknown'}
@@ -262,7 +274,7 @@ export default function PredictionWidget() {
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ color: 'var(--text-muted)' }}>{p.type}</span>
                     <span style={{ color: p.won ? 'var(--neon-green)' : '#ff4d4d', fontWeight: 'bold' }}>
-                      {p.won ? `+${p.payout} SAT` : `-${p.stake} SAT`}
+                      {p.won ? `+${isConnected ? (p.payout ?? 0).toFixed(4) : (p.payout ?? 0)} ${currency}` : `-${isConnected ? p.stake.toFixed(4) : p.stake} ${currency}`}
                     </span>
                   </div>
                   <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.4)', marginTop: '2px' }}>
